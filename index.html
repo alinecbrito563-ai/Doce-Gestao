@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DoceGestão · Sistema de Gestão para Confeitaria</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="app">
+
+  <!-- ===================== SIDEBAR ===================== -->
+  <aside id="sidebar">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 48 48" width="30" height="30" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M8 20c0-8 7-14 16-14s16 6 16 14"/>
+          <path d="M6 20h36l-3 20a4 4 0 0 1-4 4H13a4 4 0 0 1-4-4L6 20Z"/>
+          <path d="M17 20v-2M24 20v-3M31 20v-2"/>
+        </svg>
+      </div>
+      <div class="brand-text">
+        <strong>DoceGestão</strong>
+        <span>controle de confeitaria</span>
+      </div>
+    </div>
+
+    <nav id="mainNav">
+      <button class="nav-item active" data-view="dashboard" data-action="ir-para-view">
+        <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="3" width="8" height="5" rx="2"/><rect x="13" y="12" width="8" height="9" rx="2"/><rect x="3" y="15" width="8" height="6" rx="2"/></svg>
+        <span>Dashboard</span>
+      </button>
+      <button class="nav-item" data-view="estoque" data-action="ir-para-view">
+        <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7l9-4 9 4-9 4-9-4Z"/><path d="M3 7v10l9 4 9-4V7"/><path d="M12 11v10"/></svg>
+        <span>Estoque</span>
+      </button>
+      <button class="nav-item" data-view="receitas" data-action="ir-para-view">
+        <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h9l4 4v13a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z"/><path d="M8 9h7M8 13h7M8 17h4"/></svg>
+        <span>Receitas</span>
+      </button>
+      <button class="nav-item" data-view="calculos" data-action="ir-para-view">
+        <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="2" width="16" height="20" rx="2"/><path d="M8 7h8M8 11h1M11.5 11h1M15 11h1M8 15h1M11.5 15h1M15 15h1M8 19h1M11.5 19h1M15 19h1"/></svg>
+        <span>Cálculos</span>
+      </button>
+      <button class="nav-item" data-view="producoes" data-action="ir-para-view">
+        <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21V10l4-5 4 5v11"/><path d="M12 21V7l4-4 4 4v14"/><path d="M2 21h20"/></svg>
+        <span>Produções</span>
+      </button>
+      <button class="nav-item" data-view="movimentacoes" data-action="ir-para-view">
+        <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7h13l-3-3M17 17H4l3 3"/></svg>
+        <span>Movimentações</span>
+      </button>
+      <button class="nav-item" data-view="configuracoes" data-action="ir-para-view">
+        <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 13a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.56V19a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1H4a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.56-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34H10a1.7 1.7 0 0 0 1-1.56V4a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87V10a1.7 1.7 0 0 0 1.56 1H20a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.56 1Z"/></svg>
+        <span>Configurações</span>
+      </button>
+    </nav>
+
+    <div class="sidebar-footer">
+      <span>v1.0 · dados locais</span>
+    </div>
+  </aside>
+
+  <!-- ===================== CONTEÚDO ===================== -->
+  <main id="mainContent">
+
+    <header class="view-header">
+      <h1 id="viewTitle">Dashboard</h1>
+      <p id="viewSubtitle">Visão geral da sua confeitaria hoje</p>
+    </header>
+
+    <!-- DASHBOARD -->
+    <section class="view active" id="view-dashboard"><div id="dashboardContainer"></div></section>
+
+    <!-- ESTOQUE -->
+    <section class="view" id="view-estoque">
+      <div class="toolbar">
+        <div class="search-box">
+          <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+          <input type="text" id="estoqueSearch" placeholder="Buscar ingrediente...">
+        </div>
+        <button class="btn btn-primary" data-action="novo-ingrediente">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+          Novo ingrediente
+        </button>
+      </div>
+      <div class="card-grid" id="estoqueGrid"></div>
+    </section>
+
+    <!-- RECEITAS -->
+    <section class="view" id="view-receitas">
+      <div class="toolbar">
+        <div class="search-box">
+          <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+          <input type="text" id="receitasSearch" placeholder="Buscar receita...">
+        </div>
+        <button class="btn btn-primary" data-action="nova-receita">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+          Nova receita
+        </button>
+      </div>
+      <div class="card-grid" id="receitasGrid"></div>
+    </section>
+
+    <!-- CÁLCULOS -->
+    <section class="view" id="view-calculos">
+      <div class="calc-tabs" id="calcTabs">
+        <button class="calc-tab active" data-tipo="receita" data-action="calc-tab">Receita inteira</button>
+        <button class="calc-tab" data-tipo="quantidade" data-action="calc-tab">Quantidade específica</button>
+        <button class="calc-tab" data-tipo="cento" data-action="calc-tab">Cento</button>
+        <button class="calc-tab" data-tipo="caixa" data-action="calc-tab">Caixa mista</button>
+      </div>
+      <div class="panel" id="calculoFormContainer"></div>
+      <h2 class="section-title">Histórico de cálculos</h2>
+      <div class="calc-history" id="calculoHistorico"></div>
+    </section>
+
+    <!-- PRODUÇÕES -->
+    <section class="view" id="view-producoes">
+      <div class="panel" id="producaoFormContainer"></div>
+      <h2 class="section-title">Produções registradas</h2>
+      <div class="producoes-list" id="producoesList"></div>
+    </section>
+
+    <!-- MOVIMENTAÇÕES -->
+    <section class="view" id="view-movimentacoes">
+      <div class="toolbar">
+        <div class="search-box">
+          <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+          <input type="text" id="movSearch" placeholder="Buscar por ingrediente ou descrição...">
+        </div>
+        <select id="movTipoFiltro">
+          <option value="">Todos os tipos</option>
+          <option value="Compra">Compra</option>
+          <option value="Produção">Produção</option>
+          <option value="Consumo pessoal">Consumo pessoal</option>
+          <option value="Degustação">Degustação</option>
+          <option value="Perda">Perda</option>
+          <option value="Ajuste manual">Ajuste manual</option>
+          <option value="Estorno">Estorno</option>
+        </select>
+      </div>
+      <div class="statement" id="movimentacoesList"></div>
+    </section>
+
+    <!-- CONFIGURAÇÕES -->
+    <section class="view" id="view-configuracoes"><div id="configContainer"></div></section>
+
+  </main>
+</div>
+
+<!-- ===================== MODAL ===================== -->
+<div class="modal-overlay hidden" id="modalOverlay">
+  <div class="modal-box" id="modalBox" role="dialog" aria-modal="true"></div>
+</div>
+
+<!-- ===================== TOASTS ===================== -->
+<div id="toastContainer"></div>
+
+<!-- ===================== NAV MOBILE ===================== -->
+<nav id="mobileNav">
+  <button class="nav-item active" data-view="dashboard" data-action="ir-para-view">
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="3" width="8" height="5" rx="2"/><rect x="13" y="12" width="8" height="9" rx="2"/><rect x="3" y="15" width="8" height="6" rx="2"/></svg>
+  </button>
+  <button class="nav-item" data-view="estoque" data-action="ir-para-view">
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7l9-4 9 4-9 4-9-4Z"/><path d="M3 7v10l9 4 9-4V7"/><path d="M12 11v10"/></svg>
+  </button>
+  <button class="nav-item" data-view="receitas" data-action="ir-para-view">
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h9l4 4v13a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z"/><path d="M8 9h7M8 13h7M8 17h4"/></svg>
+  </button>
+  <button class="nav-item" data-view="calculos" data-action="ir-para-view">
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="2" width="16" height="20" rx="2"/><path d="M8 7h8M8 11h1M11.5 11h1M15 11h1M8 15h1M11.5 15h1M15 15h1M8 19h1M11.5 19h1M15 19h1"/></svg>
+  </button>
+  <button class="nav-item" data-view="producoes" data-action="ir-para-view">
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21V10l4-5 4 5v11"/><path d="M12 21V7l4-4 4 4v14"/><path d="M2 21h20"/></svg>
+  </button>
+  <button class="nav-item" data-view="movimentacoes" data-action="ir-para-view">
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7h13l-3-3M17 17H4l3 3"/></svg>
+  </button>
+  <button class="nav-item" data-view="configuracoes" data-action="ir-para-view">
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 13a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.56V19a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1H4a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.56-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34H10a1.7 1.7 0 0 0 1-1.56V4a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87V10a1.7 1.7 0 0 0 1.56 1H20a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.56 1Z"/></svg>
+  </button>
+</nav>
+
+<input type="file" id="importFileInput" accept="application/json" style="display:none">
+
+<script src="script.js"></script>
+</body>
+</html>
