@@ -14,6 +14,28 @@
   const DB_KEY = 'doceGestaoDB_v1';
   const EPS = 1e-6; // tolerância para comparações de ponto flutuante em quantidades
 
+  /* ======================================================================
+     1.1 CONFIGURAÇÃO DO SUPABASE
+     Preencha estes dois valores com os dados do seu projeto Supabase
+     (Painel do projeto → Project Settings → API). Ambos são públicos —
+     nunca coloque aqui a service_role key nem qualquer chave secreta.
+     ====================================================================== */
+  const SUPABASE_URL = 'https://rlcpkmslmdyzgpxhyivw.supabase.co';
+  const SUPABASE_ANON_KEY = 'sb_publishable_k1YSUxaN3uPzlJwPPLdZfg_M2p4-PL4';
+  const SUPABASE_CONFIGURADO = /^https?:\/\//.test(SUPABASE_URL) && SUPABASE_ANON_KEY.length > 20;
+
+  // Nomes das tabelas no Supabase — uma por array existente dentro de `db`,
+  // todas isoladas por usuário via Row Level Security.
+  const TABELAS = ['ingredients', 'purchases', 'recipes', 'productions', 'movements', 'calculations'];
+
+  const sb = SUPABASE_CONFIGURADO
+    ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+    : null;
+
+  let currentUser = null;
+  let cloudSyncTimer = null;
+  let cloudSyncErrorShown = false;
+
   const UNIT_BASE_FACTOR = { g: 1, kg: 1000, ml: 1, L: 1000, unidade: 1 };
   const UNIT_FAMILY = { g: 'peso', kg: 'peso', ml: 'volume', L: 'volume', unidade: 'unidade' };
   const COMPATIBLE_UNITS = { peso: ['g', 'kg'], volume: ['ml', 'L'], unidade: ['unidade'] };
@@ -52,22 +74,98 @@
     };
   }
 
-  let db = loadDB();
+  // `db` começa vazio e só é populado de fato depois do login, dentro de
+  // bootApp() (ver seção de INICIALIZAÇÃO no final do arquivo). Isso evita
+  // que qualquer tela tente renderizar dados antes de sabermos quem é o
+  // usuário autenticado.
+  let db = defaultDB();
 
-  function loadDB() {
+  // ------------------------------------------------------------------------
+  // Camada de dados (única, centralizada): tudo que lê ou grava dados passa
+  // por aqui. O restante do sistema (regras de negócio, telas) continua
+  // trabalhando exatamente como antes sobre o objeto `db` em memória — a
+  // única mudança é ONDE esse objeto é carregado/persistido.
+  //
+  //   - loadDBFromSupabase(userId): fonte de verdade principal, usada no
+  //     login e ao recarregar a página já autenticado.
+  //   - loadDBFromLocalCache(): apenas uma rede de segurança (ex.: para não
+  //     perder a tela em branco caso a internet caia bem no instante do
+  //     carregamento); o Supabase continua sendo o armazenamento principal.
+  //   - saveDB(): chamada pelas mesmas ~40 funções de regra de negócio que
+  //     já existiam, sem nenhuma mudança nelas. Grava instantaneamente um
+  //     cache local (para a interface continuar 100% síncrona) e agenda,
+  //     de forma centralizada, o envio de tudo para o Supabase.
+  // ------------------------------------------------------------------------
+
+  function loadDBFromLocalCache() {
     try {
       const raw = localStorage.getItem(DB_KEY);
       if (!raw) return defaultDB();
       const parsed = JSON.parse(raw);
       return Object.assign(defaultDB(), parsed);
     } catch (e) {
-      console.error('Erro ao carregar dados, iniciando banco vazio.', e);
+      console.error('Erro ao carregar cache local, iniciando banco vazio.', e);
       return defaultDB();
     }
   }
 
+  async function loadDBFromSupabase(userId) {
+    const tabelaResults = await Promise.all(TABELAS.map((t) => sb.from(t).select('payload')));
+    tabelaResults.forEach((r) => { if (r.error) throw r.error; });
+    const settingsRes = await sb.from('user_settings').select('payload').eq('user_id', userId).maybeSingle();
+    if (settingsRes.error) throw settingsRes.error;
+    const loaded = { settings: (settingsRes.data && settingsRes.data.payload) ? settingsRes.data.payload : { multiplicador: 3 } };
+    TABELAS.forEach((t, i) => { loaded[t] = (tabelaResults[i].data || []).map((r) => r.payload); });
+    return Object.assign(defaultDB(), loaded);
+  }
+
+  // Substitui integralmente as linhas de uma tabela (para o usuário atual)
+  // pelo conteúdo atual do array correspondente em `db`. Simples e sempre
+  // consistente — sem precisar calcular diffs — o que é adequado ao volume
+  // de dados de uma confeitaria.
+  async function replaceTable(tableName, records, userId) {
+    const { data: existing, error: selErr } = await sb.from(tableName).select('id').eq('user_id', userId);
+    if (selErr) throw selErr;
+    const existingIds = new Set((existing || []).map((r) => r.id));
+    const currentIds = new Set(records.map((r) => r.id));
+    const toDelete = [...existingIds].filter((id) => !currentIds.has(id));
+    if (toDelete.length) {
+      const { error: delErr } = await sb.from(tableName).delete().eq('user_id', userId).in('id', toDelete);
+      if (delErr) throw delErr;
+    }
+    if (records.length) {
+      const rows = records.map((r) => ({ id: r.id, user_id: userId, payload: r }));
+      const { error: upErr } = await sb.from(tableName).upsert(rows, { onConflict: 'user_id,id' });
+      if (upErr) throw upErr;
+    }
+  }
+
+  async function syncAllToSupabase() {
+    if (!currentUser || !sb) return;
+    try {
+      await Promise.all([
+        ...TABELAS.map((t) => replaceTable(t, db[t], currentUser.id)),
+        sb.from('user_settings').upsert({ user_id: currentUser.id, payload: db.settings }, { onConflict: 'user_id' }),
+      ]);
+      cloudSyncErrorShown = false;
+    } catch (e) {
+      console.error('Erro ao sincronizar com o Supabase:', e);
+      if (!cloudSyncErrorShown) {
+        cloudSyncErrorShown = true;
+        toast('Não foi possível sincronizar com a nuvem agora. Os dados continuam salvos neste dispositivo.', 'warning');
+      }
+    }
+  }
+
+  function queueCloudSync() {
+    if (!sb || !currentUser) return;
+    if (cloudSyncTimer) clearTimeout(cloudSyncTimer);
+    cloudSyncTimer = setTimeout(syncAllToSupabase, 500);
+  }
+
   function saveDB() {
-    localStorage.setItem(DB_KEY, JSON.stringify(db));
+    localStorage.setItem(DB_KEY, JSON.stringify(db)); // cache local instantâneo, mantém a interface síncrona
+    queueCloudSync(); // grava no Supabase (armazenamento principal), de forma centralizada e assíncrona
   }
 
   function uid() {
@@ -87,6 +185,44 @@
     const a = new Date(isoDateA + 'T00:00:00');
     const b = new Date(isoDateB + 'T00:00:00');
     return Math.round((b - a) / 86400000);
+  }
+
+  // Verifica se uma data (YYYY-MM-DD) cai dentro do período selecionado no
+  // resumo de vendas das Produções e no Financeiro (função única, reaproveitada
+  // pelas duas telas para evitar lógica de período duplicada/divergente).
+  function isDateInPeriod(dateISO, period, customFrom, customTo) {
+    if (!dateISO) return false;
+    if (period === 'hoje') return dateISO === todayISO();
+    if (period === 'semana') {
+      const now = new Date(todayISO() + 'T00:00:00');
+      const dayOfWeek = now.getDay(); // 0 = domingo
+      const diffToMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+      const monday = new Date(now); monday.setDate(now.getDate() - diffToMonday);
+      const sunday = new Date(monday); sunday.setDate(monday.getDate() + 6);
+      const d = new Date(dateISO + 'T00:00:00');
+      return d >= monday && d <= sunday;
+    }
+    if (period === 'mes' || period === 'mesAnterior') {
+      const now = new Date(todayISO() + 'T00:00:00');
+      let year = now.getFullYear();
+      let month = now.getMonth();
+      if (period === 'mesAnterior') {
+        month -= 1;
+        if (month < 0) { month = 11; year -= 1; }
+      }
+      const d = new Date(dateISO + 'T00:00:00');
+      return d.getFullYear() === year && d.getMonth() === month;
+    }
+    if (period === 'ano') {
+      const now = new Date(todayISO() + 'T00:00:00');
+      const d = new Date(dateISO + 'T00:00:00');
+      return d.getFullYear() === now.getFullYear();
+    }
+    if (period === 'personalizado') {
+      if (!customFrom || !customTo) return true; // sem intervalo definido ainda: não filtra
+      return dateISO >= customFrom && dateISO <= customTo;
+    }
+    return true;
   }
 
   function formatDateBR(iso) {
@@ -425,14 +561,23 @@
   // mutação no banco de dados.
   // ------------------------------------------------------------------------
 
+  // Monta o plano de consumo FIFO (lote mais antigo primeiro) e já calcula o
+  // custo EXATO de cada retirada, usando o preço real daquele lote específico
+  // (nunca uma média ponderada). É esse custo por retirada que alimenta o
+  // custo real e congelado de cada produção.
   function planConsumption(ingredienteId, neededBase) {
+    const ing = getIngredient(ingredienteId);
+    const factor = ing ? (UNIT_BASE_FACTOR[ing.unidade] || 1) : 1;
     const lots = getPurchasesFor(ingredienteId).filter((p) => p.quantidadeRestanteBase > EPS);
     let remaining = neededBase;
     const plan = [];
     for (const lot of lots) {
       if (remaining <= EPS) break;
       const take = Math.min(lot.quantidadeRestanteBase, remaining);
-      if (take > EPS) plan.push({ purchaseId: lot.id, quantidadeBase: take });
+      if (take > EPS) {
+        const pricePerBase = lot.valorUnitario / factor;
+        plan.push({ purchaseId: lot.id, quantidadeBase: take, custo: take * pricePerBase });
+      }
       remaining -= take;
     }
     return { ok: remaining <= EPS, faltanteBase: Math.max(0, remaining), plan };
@@ -594,6 +739,59 @@
      9. PRODUÇÕES
      ====================================================================== */
 
+  // Migra produções salvas antes deste recurso existir. Regra de ouro: NUNCA
+  // inventar um custo histórico usando preços atuais dos ingredientes.
+  //   - Se a produção já tem os lotes consumidos registrados (consumos), o
+  //     custo real é recuperado a partir do preço histórico de CADA compra
+  //     (um fato já gravado e confiável, não uma estimativa) — sem usar
+  //     média ponderada, apenas o preço do lote realmente retirado.
+  //   - Se não houver dado confiável (produção antiga sem consumos, ou lote
+  //     que não existe mais), a produção é marcada com custoNaoRegistrado:true
+  //     e o custo é tratado como zero/"não registrado" em toda a interface —
+  //     nunca um número inventado.
+  function migrateProductions() {
+    let changed = false;
+    db.productions.forEach((p) => {
+      if (typeof p.custoTotal !== 'number' || typeof p.custoNaoRegistrado === 'undefined') {
+        if (Array.isArray(p.consumos) && p.consumos.length) {
+          let total = 0;
+          let algumaFalha = false;
+          p.consumos.forEach((item) => {
+            const ing = getIngredient(item.ingredienteId);
+            const factor = ing ? (UNIT_BASE_FACTOR[ing.unidade] || 1) : 1;
+            (item.lots || []).forEach((l) => {
+              if (typeof l.custo === 'number') { total += l.custo; return; }
+              const purchase = db.purchases.find((x) => x.id === l.purchaseId);
+              if (purchase) {
+                const custo = l.quantidadeBase * (purchase.valorUnitario / factor);
+                l.custo = custo; // preenche para não precisar recalcular de novo
+                total += custo;
+              } else {
+                algumaFalha = true;
+              }
+            });
+          });
+          p.custoTotal = algumaFalha ? 0 : total;
+          p.custoNaoRegistrado = algumaFalha;
+        } else {
+          p.custoTotal = 0;
+          p.custoNaoRegistrado = true;
+        }
+        changed = true;
+      }
+      if (typeof p.precoVendaUnitario !== 'number') {
+        const qtd = Number(p.quantidadeVendida) || 0;
+        p.precoVendaUnitario = qtd > 0 && p.valorVendido ? Number(p.valorVendido) / qtd : 0;
+        changed = true;
+      }
+      if (typeof p.dataVenda === 'undefined') {
+        p.dataVenda = (Number(p.quantidadeVendida) || 0) > 0 ? p.data : '';
+        changed = true;
+      }
+    });
+    if (changed) saveDB();
+  }
+
   // Monta um mensagem legível listando cada ingrediente faltante e a quantidade.
   function buildFaltaMessage(faltas) {
     if (!faltas.length) return '';
@@ -642,20 +840,24 @@
 
   // Aplica de fato o consumo de uma produção já validada como viável: debita
   // os lotes (FIFO), cria as movimentações e retorna exatamente quais lotes
-  // foram usados (para permitir estorno exato depois).
+  // foram usados — cada um com sua quantidade e seu custo real de retirada —
+  // para permitir estorno exato e custo real (não em média) depois.
   function applyProductionConsumption(recipe, neededByIngredient, dataMov) {
     const consumos = [];
     const movementIds = [];
+    let custoTotalReal = 0;
     Object.keys(neededByIngredient).forEach((ingId) => {
       const result = planConsumption(ingId, neededByIngredient[ingId]);
       // Não deve falhar aqui: a viabilidade já foi validada antes de chamar esta função.
       applyConsumptionPlan(result.plan);
       const total = result.plan.reduce((s, x) => s + x.quantidadeBase, 0);
+      const custoIngrediente = result.plan.reduce((s, x) => s + (x.custo || 0), 0);
+      custoTotalReal += custoIngrediente;
       const mov = addMovement({ tipo: 'Produção', ingredienteId: ingId, quantidadeBase: -total, data: dataMov || todayISO(), descricao: `Produção: ${recipe.nome}` });
-      consumos.push({ ingredienteId: ingId, lots: result.plan });
+      consumos.push({ ingredienteId: ingId, lots: result.plan.map((x) => ({ purchaseId: x.purchaseId, quantidadeBase: x.quantidadeBase, custo: x.custo })) });
       movementIds.push(mov.id);
     });
-    return { consumos, movementIds };
+    return { consumos, movementIds, custoTotalReal };
   }
 
   function registerProduction(data) {
@@ -680,7 +882,10 @@
       data: data.data || todayISO(),
       observacoes: data.observacoes || '',
       quantidadeVendida: 0,
-      valorVendido: 0,
+      precoVendaUnitario: 0,
+      dataVenda: '',
+      custoTotal: applied.custoTotalReal, // congelado: custo real FIFO, nunca recalculado depois
+      custoNaoRegistrado: false,
       consumos: applied.consumos,
       movementIds: applied.movementIds,
       criadoEm: Date.now(),
@@ -691,12 +896,45 @@
     return production;
   }
 
-  function updateProductionSales(id, { quantidadeVendida, valorVendido }) {
+  // Calcula, a partir dos dados congelados/registrados de uma produção, todas
+  // as métricas de venda e lucro exibidas na tela. O custo total é o valor
+  // CONGELADO no momento da criação/edição da produção (o custo real FIFO
+  // dos lotes efetivamente consumidos) — nunca recalculado com preços atuais.
+  // Se o custo não puder ser recuperado com confiança (produção muito antiga,
+  // de antes deste recurso existir), custoRegistrado vem false e nenhum valor
+  // derivado de custo é inventado.
+  function computeProductionMetrics(production) {
+    const quantidadeProduzida = Number(production.quantidadeProduzida) || 0;
+    const quantidadeVendida = Number(production.quantidadeVendida) || 0;
+    const precoVendaUnitario = Number(production.precoVendaUnitario) || 0;
+    const custoRegistrado = typeof production.custoTotal === 'number' && !production.custoNaoRegistrado;
+    const custoTotal = custoRegistrado ? production.custoTotal : 0;
+    const custoUnitario = custoRegistrado && quantidadeProduzida > 0 ? custoTotal / quantidadeProduzida : 0;
+    const custoVendido = custoUnitario * quantidadeVendida;
+    const faturamento = precoVendaUnitario * quantidadeVendida;
+    const lucro = custoRegistrado ? faturamento - custoVendido : 0;
+    const margemLucro = custoRegistrado && faturamento > 0 ? (lucro / faturamento) * 100 : 0;
+    const quantidadeRestante = Math.max(0, quantidadeProduzida - quantidadeVendida);
+    return { custoTotal, custoUnitario, custoVendido, faturamento, lucro, margemLucro, quantidadeRestante, custoRegistrado };
+  }
+
+  // Atualiza os dados de venda de uma produção já registrada. Nunca permite
+  // vender mais do que foi produzido.
+  function updateProductionSales(id, { quantidadeVendida, precoVendaUnitario, dataVenda }) {
     const p = db.productions.find((x) => x.id === id);
-    if (!p) return;
-    p.quantidadeVendida = Number(quantidadeVendida) || 0;
-    p.valorVendido = Number(valorVendido) || 0;
+    if (!p) return { ok: false, message: 'Produção não encontrada.' };
+    const qtd = Number(quantidadeVendida) || 0;
+    if (qtd < 0) return { ok: false, message: 'A quantidade vendida não pode ser negativa.' };
+    if (qtd > (Number(p.quantidadeProduzida) || 0) + EPS) {
+      return { ok: false, message: `A quantidade vendida não pode ser maior do que a quantidade produzida (${formatNumber(p.quantidadeProduzida, 0)} un.).` };
+    }
+    const preco = Number(precoVendaUnitario) || 0;
+    if (preco < 0) return { ok: false, message: 'O preço de venda não pode ser negativo.' };
+    p.quantidadeVendida = qtd;
+    p.precoVendaUnitario = preco;
+    p.dataVenda = dataVenda || (qtd > 0 ? (p.dataVenda || p.data || todayISO()) : '');
     saveDB();
+    return { ok: true };
   }
 
   // Desfaz completamente uma produção: devolve as quantidades exatamente aos
@@ -768,6 +1006,16 @@
     production.observacoes = data.observacoes || '';
     production.consumos = applied.consumos;
     production.movementIds = applied.movementIds;
+    // Recongela o custo com os lotes REALMENTE consumidos agora (FIFO exato),
+    // já que a edição é, na prática, uma "nova criação" da produção.
+    production.custoTotal = applied.custoTotalReal;
+    production.custoNaoRegistrado = false;
+    // Se a nova quantidade produzida for menor que a já vendida, ajusta a
+    // quantidade vendida para não ficar inconsistente (não pode vender mais do
+    // que foi produzido).
+    if ((Number(production.quantidadeVendida) || 0) > newQuantidade) {
+      production.quantidadeVendida = newQuantidade;
+    }
     saveDB();
     return { ok: true };
   }
@@ -815,12 +1063,19 @@
     calculos: ['Cálculos', 'Calcule o valor de venda em segundos'],
     producoes: ['Produções', 'Registre produções e baixa automática de estoque'],
     movimentacoes: ['Movimentações', 'Extrato completo do seu estoque'],
+    financeiro: ['Financeiro', 'Quanto você gastou, vendeu e lucrou'],
     configuracoes: ['Configurações', 'Preferências e backup dos seus dados'],
   };
 
   let currentView = 'dashboard';
   let currentCalcTab = 'receita';
   let currentCaixaItems = [];
+  let currentProducaoPeriodo = 'mes';
+  let producaoPeriodoCustomFrom = '';
+  let producaoPeriodoCustomTo = '';
+  let currentFinanceiroPeriodo = 'mes';
+  let financeiroPeriodoCustomFrom = '';
+  let financeiroPeriodoCustomTo = '';
 
   function goToView(view) {
     currentView = view;
@@ -841,11 +1096,30 @@
     else if (view === 'calculos') renderCalculos();
     else if (view === 'producoes') renderProducoes();
     else if (view === 'movimentacoes') renderMovimentacoes();
+    else if (view === 'financeiro') renderFinanceiro();
     else if (view === 'configuracoes') renderConfiguracoes();
   }
 
+  // Atualiza TODAS as telas do sistema, não apenas a que está visível no
+  // momento. Isso garante que, ao voltar para qualquer tela (Dashboard,
+  // Estoque, Receitas, Produções, Movimentações, Cálculos, Configurações), os
+  // dados — e todos os campos de seleção (selects) que dependem deles — já
+  // estejam atualizados, sem nunca depender de recarregar a página (F5).
+  //
+  // Exceção deliberada: o FORMULÁRIO ativo de Cálculos (renderCalcForm) não é
+  // reconstruído aqui, para não apagar um cálculo que o usuário esteja
+  // digitando no momento em outra aba; o histórico de cálculos (que não tem
+  // esse risco) é sempre atualizado normalmente.
   function renderAll() {
-    renderView(currentView);
+    renderDashboard();
+    renderEstoque();
+    renderReceitas();
+    renderProducaoResumo();
+    renderProducaoLista();
+    renderMovimentacoes();
+    renderCalcHistory();
+    renderFinanceiro();
+    renderConfiguracoes();
   }
 
   /* ======================================================================
@@ -1035,6 +1309,9 @@
         document.getElementById('saveIngredientBtn').addEventListener('click', () => {
           const nome = document.getElementById('fNome').value.trim();
           if (!nome) { toast('Informe o nome do ingrediente.', 'danger'); return; }
+          if (Number(document.getElementById('fMinimo').value) < 0) { toast('O estoque mínimo não pode ser negativo.', 'danger'); return; }
+          const pesoField = document.getElementById('fPeso');
+          if (pesoField && Number(pesoField.value) < 0) { toast('O peso por unidade não pode ser negativo.', 'danger'); return; }
           const data = {
             nome,
             unidade: document.getElementById('fUnidade').value,
@@ -1148,6 +1425,7 @@
             dataCompra: document.getElementById('pData').value,
           };
           if (!data.quantidade || Number(data.quantidade) <= 0) { toast('Informe uma quantidade válida.', 'danger'); return; }
+          if (Number(data.valorTotal) < 0) { toast('O valor total não pode ser negativo.', 'danger'); return; }
           if (editing) {
             const result = updatePurchase(editing.id, data);
             if (!result.ok) { toast(result.message, 'danger'); return; }
@@ -1472,7 +1750,7 @@
         const r = getRecipe(document.getElementById('calcReceita').value);
         const cost = computeRecipeCost(r);
         addCalculation({ tipo: 'receita', titulo: `Receita inteira — ${r.nome}`, detalhes: { receitaId: r.id, receitaNome: r.nome }, custoTotal: cost.custoTotal, valorVenda: cost.valorVendaTotal });
-        renderCalcHistory();
+        renderAll();
         toast('Cálculo salvo no histórico.', 'success');
       });
     }
@@ -1504,7 +1782,7 @@
         const custo = cost.custoUnitario * qtd;
         const venda = cost.valorVendaUnitario * qtd;
         addCalculation({ tipo: 'quantidade', titulo: `${formatNumber(qtd, 0)}x ${r.nome}`, detalhes: { receitaId: r.id, receitaNome: r.nome, quantidade: qtd }, custoTotal: custo, valorVenda: venda });
-        renderCalcHistory();
+        renderAll();
         toast('Cálculo salvo no histórico.', 'success');
       });
     }
@@ -1528,7 +1806,7 @@
         const r = getRecipe(document.getElementById('calcReceita').value);
         const cost = computeRecipeCost(r);
         addCalculation({ tipo: 'cento', titulo: `Cento — ${r.nome}`, detalhes: { receitaId: r.id, receitaNome: r.nome }, custoTotal: cost.custoUnitario * 100, valorVenda: cost.valorVendaUnitario * 100 });
-        renderCalcHistory();
+        renderAll();
         toast('Cálculo salvo no histórico.', 'success');
       });
     }
@@ -1596,7 +1874,7 @@
         });
         currentCaixaItems = [];
         renderCalcForm();
-        renderCalcHistory();
+        renderAll();
         toast('Cálculo salvo no histórico.', 'success');
       });
     }
@@ -1637,62 +1915,166 @@
      16. RENDER: PRODUÇÕES
      ====================================================================== */
 
-  function renderProducoes() {
+  const PERIODO_LABELS = { hoje: 'Hoje', mes: 'Este mês', mesAnterior: 'Mês anterior', personalizado: 'Personalizado' };
+
+  function renderProducaoResumo() {
+    const container = document.getElementById('producaoResumo');
+    const productions = db.productions.filter((p) => isDateInPeriod(p.dataVenda, currentProducaoPeriodo, producaoPeriodoCustomFrom, producaoPeriodoCustomTo));
+
+    let faturamentoTotal = 0, custoVendasTotal = 0, quantidadeVendidaTotal = 0;
+    productions.forEach((p) => {
+      const m = computeProductionMetrics(p);
+      faturamentoTotal += m.faturamento;
+      custoVendasTotal += m.custoVendido;
+      quantidadeVendidaTotal += Number(p.quantidadeVendida) || 0;
+    });
+    const lucroTotal = faturamentoTotal - custoVendasTotal;
+    const margemTotal = faturamentoTotal > 0 ? (lucroTotal / faturamentoTotal) * 100 : 0;
+
+    container.innerHTML = `
+      <div class="calc-tabs" id="producaoPeriodoTabs">
+        <button class="calc-tab ${currentProducaoPeriodo === 'hoje' ? 'active' : ''}" data-action="producao-periodo" data-periodo="hoje">Hoje</button>
+        <button class="calc-tab ${currentProducaoPeriodo === 'mes' ? 'active' : ''}" data-action="producao-periodo" data-periodo="mes">Este mês</button>
+        <button class="calc-tab ${currentProducaoPeriodo === 'mesAnterior' ? 'active' : ''}" data-action="producao-periodo" data-periodo="mesAnterior">Mês anterior</button>
+        <button class="calc-tab ${currentProducaoPeriodo === 'personalizado' ? 'active' : ''}" data-action="producao-periodo" data-periodo="personalizado">Personalizado</button>
+      </div>
+      ${currentProducaoPeriodo === 'personalizado' ? `
+        <div class="form-grid cols-3" style="margin-bottom:16px;">
+          <div class="field"><label>De</label><input type="date" id="producaoPeriodoDe" value="${producaoPeriodoCustomFrom}"></div>
+          <div class="field"><label>Até</label><input type="date" id="producaoPeriodoAte" value="${producaoPeriodoCustomTo}"></div>
+        </div>
+      ` : ''}
+      <div class="dash-grid" style="margin-bottom:26px;">
+        <div class="stat-card tone-success">
+          <div class="stat-icon">${ICONS.cart}</div>
+          <div class="stat-value">${formatMoney(faturamentoTotal)}</div>
+          <div class="stat-label">Faturamento total · ${PERIODO_LABELS[currentProducaoPeriodo]}</div>
+        </div>
+        <div class="stat-card tone-warn">
+          <div class="stat-icon">${ICONS.box}</div>
+          <div class="stat-value">${formatMoney(custoVendasTotal)}</div>
+          <div class="stat-label">Custo das vendas</div>
+        </div>
+        <div class="stat-card tone-primary">
+          <div class="stat-icon">${ICONS.calc}</div>
+          <div class="stat-value">${formatMoney(lucroTotal)}</div>
+          <div class="stat-label">Lucro estimado · margem ${formatNumber(margemTotal, 1)}%</div>
+        </div>
+        <div class="stat-card tone-gold">
+          <div class="stat-icon">${ICONS.factory}</div>
+          <div class="stat-value">${formatNumber(quantidadeVendidaTotal, 0)}</div>
+          <div class="stat-label">Unidades vendidas</div>
+        </div>
+      </div>
+    `;
+
+    if (currentProducaoPeriodo === 'personalizado') {
+      const applyRange = () => {
+        producaoPeriodoCustomFrom = document.getElementById('producaoPeriodoDe').value;
+        producaoPeriodoCustomTo = document.getElementById('producaoPeriodoAte').value;
+        renderProducaoResumo();
+      };
+      document.getElementById('producaoPeriodoDe').addEventListener('change', applyRange);
+      document.getElementById('producaoPeriodoAte').addEventListener('change', applyRange);
+    }
+  }
+
+  function renderProducaoForm() {
     const formContainer = document.getElementById('producaoFormContainer');
     if (!db.recipes.length) {
       formContainer.innerHTML = `<p class="confirm-text">Cadastre uma receita antes de registrar produções.</p>`;
-    } else {
-      formContainer.innerHTML = `
-        <h2 class="section-title" style="margin-top:0;">Registrar nova produção</h2>
-        <div class="form-grid cols-3">
-          <div class="field"><label>Receita</label><select id="pReceita">${db.recipes.map((r) => `<option value="${r.id}">${escapeHtml(r.nome)}</option>`).join('')}</select></div>
-          <div class="field"><label>Quantidade produzida</label><input type="number" min="1" step="any" id="pQuantidade" value="1"></div>
-          <div class="field"><label>Data</label><input type="date" id="pData" value="${todayISO()}"></div>
-          <div class="field span-2"><label>Observações</label><input type="text" id="pObs" placeholder="Opcional"></div>
-        </div>
-        <div class="form-actions"><button class="btn btn-primary" id="registrarProducaoBtn">${ICONS.factory} Registrar produção</button></div>
-      `;
-      document.getElementById('registrarProducaoBtn').addEventListener('click', () => {
-        const receitaId = document.getElementById('pReceita').value;
-        const quantidadeProduzida = document.getElementById('pQuantidade').value;
-        const data = document.getElementById('pData').value;
-        const observacoes = document.getElementById('pObs').value;
-        if (!quantidadeProduzida || Number(quantidadeProduzida) <= 0) { toast('Informe uma quantidade válida.', 'danger'); return; }
-        registerProduction({ receitaId, quantidadeProduzida, data, observacoes });
-        renderAll();
-      });
+      return;
     }
+    formContainer.innerHTML = `
+      <h2 class="section-title" style="margin-top:0;">Registrar nova produção</h2>
+      <div class="form-grid cols-3">
+        <div class="field"><label>Receita</label><select id="pReceita">${db.recipes.map((r) => `<option value="${r.id}">${escapeHtml(r.nome)}</option>`).join('')}</select></div>
+        <div class="field"><label>Quantidade produzida</label><input type="number" min="1" step="any" id="pQuantidade" value="1"></div>
+        <div class="field"><label>Data</label><input type="date" id="pData" value="${todayISO()}"></div>
+        <div class="field span-2"><label>Observações</label><input type="text" id="pObs" placeholder="Opcional"></div>
+      </div>
+      <div class="form-actions"><button class="btn btn-primary" id="registrarProducaoBtn">${ICONS.factory} Registrar produção</button></div>
+    `;
+    document.getElementById('registrarProducaoBtn').addEventListener('click', () => {
+      const receitaId = document.getElementById('pReceita').value;
+      const quantidadeProduzida = document.getElementById('pQuantidade').value;
+      const data = document.getElementById('pData').value;
+      const observacoes = document.getElementById('pObs').value;
+      if (!quantidadeProduzida || Number(quantidadeProduzida) <= 0) { toast('Informe uma quantidade válida.', 'danger'); return; }
+      registerProduction({ receitaId, quantidadeProduzida, data, observacoes });
+      renderProducaoForm(); // reseta o formulário para a próxima produção
+      renderAll();
+    });
+  }
 
+  function renderProducaoLista() {
     const list = document.getElementById('producoesList');
     const productions = [...db.productions].sort((a, b) => b.criadoEm - a.criadoEm);
     if (!productions.length) {
       list.innerHTML = `<div class="empty-state">${ICONS.factory}<strong>Nenhuma produção registrada</strong>Registre sua primeira produção para acompanhar o histórico.</div>`;
       return;
     }
-    list.innerHTML = productions.map((p) => `
+    list.innerHTML = productions.map((p) => {
+      const m = computeProductionMetrics(p);
+      return `
       <div class="producao-item" data-id="${p.id}">
         <div class="info">
           <strong>${escapeHtml(p.receitaNome)} · ${formatNumber(p.quantidadeProduzida, 0)} un.</strong>
           <div>${formatDateBR(p.data)}${p.observacoes ? ' — ' + escapeHtml(p.observacoes) : ''}</div>
         </div>
-        <div class="venda-fields">
-          <input type="number" min="0" step="any" placeholder="Qtd. vendida" data-role="qtdVendida" data-id="${p.id}" value="${p.quantidadeVendida || ''}">
-          <input type="number" min="0" step="any" placeholder="Valor vendido" data-role="valorVendido" data-id="${p.id}" value="${p.valorVendido || ''}">
+        <div class="form-grid cols-3" style="margin:10px 0;">
+          <div class="field">
+            <label>Qtd. vendida</label>
+            <input type="number" min="0" step="any" data-role="qtdVendida" data-id="${p.id}" value="${p.quantidadeVendida || ''}">
+          </div>
+          <div class="field">
+            <label>Preço de venda (un.)</label>
+            <input type="number" min="0" step="any" data-role="precoVenda" data-id="${p.id}" value="${p.precoVendaUnitario || ''}">
+          </div>
+          <div class="field">
+            <label>Data da venda</label>
+            <input type="date" data-role="dataVenda" data-id="${p.id}" value="${p.dataVenda || p.data}">
+          </div>
+        </div>
+        ${!m.custoRegistrado ? `
+          <div class="recipe-price-row"><span>Custo</span><b>Custo não registrado</b></div>
+        ` : `
+          <div class="recipe-price-row"><span>Custo total da produção</span><b>${formatMoney(m.custoTotal)}</b></div>
+          <div class="recipe-price-row"><span>Custo das unidades vendidas</span><b>${formatMoney(m.custoVendido)}</b></div>
+        `}
+        <div class="recipe-price-row"><span>Faturamento total</span><b>${formatMoney(m.faturamento)}</b></div>
+        <div class="recipe-price-row"><span>Lucro estimado (${formatNumber(m.margemLucro, 1)}%)</span><b>${formatMoney(m.lucro)}</b></div>
+        <div class="recipe-price-row"><span>Quantidade restante</span><b>${formatNumber(m.quantidadeRestante, 0)} un.</b></div>
+        <div class="venda-fields" style="margin-top:10px;">
           <button class="btn btn-sm btn-icon" data-action="editar-producao" data-id="${p.id}" title="Editar">${ICONS.edit}</button>
           <button class="btn btn-sm btn-icon btn-danger" data-action="excluir-producao" data-id="${p.id}" title="Excluir">${ICONS.trash}</button>
         </div>
       </div>
-    `).join('');
-    list.querySelectorAll('[data-role="qtdVendida"], [data-role="valorVendido"]').forEach((inp) => {
+    `;
+    }).join('');
+
+    list.querySelectorAll('[data-role="qtdVendida"], [data-role="precoVenda"], [data-role="dataVenda"]').forEach((inp) => {
       inp.addEventListener('change', (e) => {
         const id = e.target.dataset.id;
         const row = list.querySelector(`.producao-item[data-id="${id}"]`);
         const qtd = row.querySelector('[data-role="qtdVendida"]').value;
-        const valor = row.querySelector('[data-role="valorVendido"]').value;
-        updateProductionSales(id, { quantidadeVendida: qtd, valorVendido: valor });
-        toast('Venda registrada.', 'success');
+        const preco = row.querySelector('[data-role="precoVenda"]').value;
+        const dataVenda = row.querySelector('[data-role="dataVenda"]').value;
+        const result = updateProductionSales(id, { quantidadeVendida: qtd, precoVendaUnitario: preco, dataVenda });
+        if (!result.ok) { toast(result.message, 'danger'); renderAll(); return; }
+        renderAll();
+        toast('Venda atualizada.', 'success');
       });
     });
+  }
+
+  // Usado ao navegar até a tela de Produções: renderiza tudo, incluindo o
+  // formulário de nova produção (seguro reconstruir aqui, pois o usuário está
+  // acabando de chegar na tela).
+  function renderProducoes() {
+    renderProducaoResumo();
+    renderProducaoForm();
+    renderProducaoLista();
   }
 
   function openEditProductionModal(id) {
@@ -1789,13 +2171,197 @@
   }
 
   /* ======================================================================
-     18. RENDER: CONFIGURAÇÕES
+     18. FINANCEIRO
+     ====================================================================== */
+
+  const FINANCEIRO_PERIODO_LABELS = { hoje: 'Hoje', semana: 'Esta semana', mes: 'Este mês', mesAnterior: 'Mês anterior', ano: 'Este ano', personalizado: 'Personalizado' };
+
+  function getProductionStatus(production) {
+    const produced = Number(production.quantidadeProduzida) || 0;
+    const sold = Number(production.quantidadeVendida) || 0;
+    if (sold <= 0) return { label: 'Sem venda', level: 'muted' };
+    if (sold < produced - EPS) return { label: 'Venda parcial', level: 'warn' };
+    return { label: 'Vendida', level: 'ok' };
+  }
+
+  // Agrega todos os dados do Financeiro para o período selecionado. Compras
+  // usam a data da COMPRA; faturamento/custo das vendas/lucro/ticket médio
+  // usam a data da VENDA (só entram produções que já têm venda); quantidade
+  // produzida e número de produções usam a data da PRODUÇÃO (entram todas,
+  // vendidas ou não).
+  function getFinanceiroData(period, customFrom, customTo) {
+    const comprasNoPeriodo = db.purchases.filter((p) => isDateInPeriod(p.dataCompra, period, customFrom, customTo));
+    const totalGastoCompras = comprasNoPeriodo.reduce((s, p) => s + (Number(p.valorTotal) || 0), 0);
+
+    const producoesPorData = db.productions.filter((p) => isDateInPeriod(p.data, period, customFrom, customTo));
+    const quantidadeProduzidaTotal = producoesPorData.reduce((s, p) => s + (Number(p.quantidadeProduzida) || 0), 0);
+    const numeroProducoes = producoesPorData.length;
+
+    const producoesComVenda = db.productions.filter((p) => (Number(p.quantidadeVendida) || 0) > 0 && isDateInPeriod(p.dataVenda, period, customFrom, customTo));
+    let faturamentoTotal = 0, custoVendasTotal = 0, quantidadeVendidaTotal = 0;
+    producoesComVenda.forEach((p) => {
+      const m = computeProductionMetrics(p);
+      faturamentoTotal += m.faturamento;
+      custoVendasTotal += m.custoVendido;
+      quantidadeVendidaTotal += Number(p.quantidadeVendida) || 0;
+    });
+    const lucroTotal = faturamentoTotal - custoVendasTotal;
+    const ticketMedio = producoesComVenda.length > 0 ? faturamentoTotal / producoesComVenda.length : 0;
+
+    const porReceita = {};
+    producoesPorData.forEach((p) => { porReceita[p.receitaNome] = (porReceita[p.receitaNome] || 0) + (Number(p.quantidadeProduzida) || 0); });
+    let receitaMaisProduzida = null, maxQtdReceita = 0;
+    Object.keys(porReceita).forEach((nome) => { if (porReceita[nome] > maxQtdReceita) { maxQtdReceita = porReceita[nome]; receitaMaisProduzida = nome; } });
+
+    const gastoPorIngrediente = {};
+    comprasNoPeriodo.forEach((p) => { gastoPorIngrediente[p.ingredienteId] = (gastoPorIngrediente[p.ingredienteId] || 0) + (Number(p.valorTotal) || 0); });
+    let ingredienteMaisGasto = null, maxGasto = 0;
+    Object.keys(gastoPorIngrediente).forEach((id) => {
+      if (gastoPorIngrediente[id] > maxGasto) { maxGasto = gastoPorIngrediente[id]; const ing = getIngredient(id); ingredienteMaisGasto = ing ? ing.nome : null; }
+    });
+
+    return {
+      totalGastoCompras, faturamentoTotal, custoVendasTotal, lucroTotal, quantidadeVendidaTotal,
+      quantidadeProduzidaTotal, numeroProducoes, ticketMedio, receitaMaisProduzida, ingredienteMaisGasto,
+      temDados: numeroProducoes > 0 || comprasNoPeriodo.length > 0,
+      producoesListadas: [...producoesPorData].sort((a, b) => b.criadoEm - a.criadoEm),
+    };
+  }
+
+  function renderFinanceiro() {
+    const container = document.getElementById('financeiroContainer');
+    const data = getFinanceiroData(currentFinanceiroPeriodo, financeiroPeriodoCustomFrom, financeiroPeriodoCustomTo);
+
+    container.innerHTML = `
+      <div class="calc-tabs" id="financeiroPeriodoTabs">
+        <button class="calc-tab ${currentFinanceiroPeriodo === 'hoje' ? 'active' : ''}" data-action="financeiro-periodo" data-periodo="hoje">Hoje</button>
+        <button class="calc-tab ${currentFinanceiroPeriodo === 'semana' ? 'active' : ''}" data-action="financeiro-periodo" data-periodo="semana">Esta semana</button>
+        <button class="calc-tab ${currentFinanceiroPeriodo === 'mes' ? 'active' : ''}" data-action="financeiro-periodo" data-periodo="mes">Este mês</button>
+        <button class="calc-tab ${currentFinanceiroPeriodo === 'mesAnterior' ? 'active' : ''}" data-action="financeiro-periodo" data-periodo="mesAnterior">Mês anterior</button>
+        <button class="calc-tab ${currentFinanceiroPeriodo === 'ano' ? 'active' : ''}" data-action="financeiro-periodo" data-periodo="ano">Este ano</button>
+        <button class="calc-tab ${currentFinanceiroPeriodo === 'personalizado' ? 'active' : ''}" data-action="financeiro-periodo" data-periodo="personalizado">Personalizado</button>
+      </div>
+      ${currentFinanceiroPeriodo === 'personalizado' ? `
+        <div class="form-grid cols-3" style="margin-bottom:16px;">
+          <div class="field"><label>De</label><input type="date" id="financeiroPeriodoDe" value="${financeiroPeriodoCustomFrom}"></div>
+          <div class="field"><label>Até</label><input type="date" id="financeiroPeriodoAte" value="${financeiroPeriodoCustomTo}"></div>
+        </div>
+      ` : ''}
+
+      <div class="dash-grid" style="margin-bottom:22px;">
+        <div class="stat-card tone-warn">
+          <div class="stat-icon">${ICONS.cart}</div>
+          <div class="stat-value">${formatMoney(data.totalGastoCompras)}</div>
+          <div class="stat-label">Total gasto em compras</div>
+        </div>
+        <div class="stat-card tone-success">
+          <div class="stat-icon">${ICONS.box}</div>
+          <div class="stat-value">${formatMoney(data.faturamentoTotal)}</div>
+          <div class="stat-label">Faturamento total</div>
+        </div>
+        <div class="stat-card tone-gold">
+          <div class="stat-icon">${ICONS.calc}</div>
+          <div class="stat-value">${formatMoney(data.custoVendasTotal)}</div>
+          <div class="stat-label">Custo das vendas</div>
+        </div>
+        <div class="stat-card tone-primary">
+          <div class="stat-icon">${ICONS.starFilled}</div>
+          <div class="stat-value">${formatMoney(data.lucroTotal)}</div>
+          <div class="stat-label">Lucro estimado</div>
+        </div>
+        <div class="stat-card tone-success">
+          <div class="stat-icon">${ICONS.factory}</div>
+          <div class="stat-value">${formatNumber(data.quantidadeVendidaTotal, 0)}</div>
+          <div class="stat-label">Quantidade vendida</div>
+        </div>
+        <div class="stat-card tone-gold">
+          <div class="stat-icon">${ICONS.factory}</div>
+          <div class="stat-value">${formatNumber(data.quantidadeProduzidaTotal, 0)}</div>
+          <div class="stat-label">Quantidade produzida</div>
+        </div>
+        <div class="stat-card tone-primary">
+          <div class="stat-icon">${ICONS.book}</div>
+          <div class="stat-value">${formatNumber(data.numeroProducoes, 0)}</div>
+          <div class="stat-label">Número de produções</div>
+        </div>
+        <div class="stat-card tone-warn">
+          <div class="stat-icon">${ICONS.cart}</div>
+          <div class="stat-value">${formatMoney(data.ticketMedio)}</div>
+          <div class="stat-label">Ticket médio</div>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-bottom:26px;">
+        <h3>${ICONS.calc} Resumo · ${FINANCEIRO_PERIODO_LABELS[currentFinanceiroPeriodo]}</h3>
+        ${!data.temDados ? `<p class="confirm-text">Sem dados no período.</p>` : `
+          <div class="mini-row"><span class="name">Total gasto em compras</span><span class="value">${formatMoney(data.totalGastoCompras)}</span></div>
+          <div class="mini-row"><span class="name">Total faturado</span><span class="value">${formatMoney(data.faturamentoTotal)}</span></div>
+          <div class="mini-row"><span class="name">Custo das vendas</span><span class="value">${formatMoney(data.custoVendasTotal)}</span></div>
+          <div class="mini-row"><span class="name">Lucro estimado</span><span class="value">${formatMoney(data.lucroTotal)}</span></div>
+          <div class="mini-row"><span class="name">Quantidade produzida</span><span class="value">${formatNumber(data.quantidadeProduzidaTotal, 0)} un.</span></div>
+          <div class="mini-row"><span class="name">Quantidade vendida</span><span class="value">${formatNumber(data.quantidadeVendidaTotal, 0)} un.</span></div>
+          <div class="mini-row"><span class="name">Número de produções</span><span class="value">${formatNumber(data.numeroProducoes, 0)}</span></div>
+          <div class="mini-row"><span class="name">Receita mais produzida</span><span class="value">${data.receitaMaisProduzida ? escapeHtml(data.receitaMaisProduzida) : '—'}</span></div>
+          <div class="mini-row"><span class="name">Ingrediente com maior gasto</span><span class="value">${data.ingredienteMaisGasto ? escapeHtml(data.ingredienteMaisGasto) : '—'}</span></div>
+        `}
+      </div>
+
+      <h2 class="section-title" style="margin-top:0;">Produções no período</h2>
+      <div class="producoes-list" id="financeiroProducoesList"></div>
+    `;
+
+    if (currentFinanceiroPeriodo === 'personalizado') {
+      const applyRange = () => {
+        financeiroPeriodoCustomFrom = document.getElementById('financeiroPeriodoDe').value;
+        financeiroPeriodoCustomTo = document.getElementById('financeiroPeriodoAte').value;
+        renderFinanceiro();
+      };
+      document.getElementById('financeiroPeriodoDe').addEventListener('change', applyRange);
+      document.getElementById('financeiroPeriodoAte').addEventListener('change', applyRange);
+    }
+
+    const list = document.getElementById('financeiroProducoesList');
+    if (!data.producoesListadas.length) {
+      list.innerHTML = `<div class="empty-state">${ICONS.factory}<strong>Nenhuma produção no período</strong>Ajuste o filtro acima ou registre produções na tela de Produções.</div>`;
+      return;
+    }
+    list.innerHTML = data.producoesListadas.map((p) => {
+      const m = computeProductionMetrics(p);
+      const status = getProductionStatus(p);
+      return `
+      <div class="producao-item">
+        <div class="info">
+          <strong>${escapeHtml(p.receitaNome)} <span class="tag-badge tag-${status.level}">${status.label}</span></strong>
+          <div>${formatDateBR(p.data)} · ${formatNumber(p.quantidadeProduzida, 0)} produzidas · ${formatNumber(p.quantidadeVendida || 0, 0)} vendidas · ${formatNumber(m.quantidadeRestante, 0)} restantes</div>
+        </div>
+        <div style="flex:1; min-width:220px;">
+          ${!m.custoRegistrado ? `<div class="recipe-price-row"><span>Custo</span><b>Custo não registrado</b></div>` : `
+            <div class="recipe-price-row"><span>Custo total</span><b>${formatMoney(m.custoTotal)}</b></div>
+            <div class="recipe-price-row"><span>Custo das vendidas</span><b>${formatMoney(m.custoVendido)}</b></div>
+          `}
+          <div class="recipe-price-row"><span>Preço de venda (un.)</span><b>${formatMoney(p.precoVendaUnitario)}</b></div>
+          <div class="recipe-price-row"><span>Faturamento</span><b>${formatMoney(m.faturamento)}</b></div>
+          <div class="recipe-price-row"><span>Lucro (${formatNumber(m.margemLucro, 1)}%)</span><b>${formatMoney(m.lucro)}</b></div>
+        </div>
+      </div>
+    `;
+    }).join('');
+  }
+
+  /* ======================================================================
+     19. RENDER: CONFIGURAÇÕES
      ====================================================================== */
 
   function renderConfiguracoes() {
     const container = document.getElementById('configContainer');
     container.innerHTML = `
       <div class="config-grid">
+        <div class="config-card">
+          <h3>Conta</h3>
+          <p>Conectado como <strong>${escapeHtml(currentUser ? currentUser.email : '—')}</strong>. Seus dados ficam salvos na sua conta e sincronizados na nuvem.</p>
+          <button class="btn" id="logoutBtn">Sair da conta</button>
+        </div>
+
         <div class="config-card">
           <h3>Multiplicador de venda</h3>
           <p>O valor final de venda é sempre <strong>Custo × multiplicador</strong>. Padrão: 3x.</p>
@@ -1823,11 +2389,22 @@
       </div>
     `;
 
+    document.getElementById('logoutBtn').addEventListener('click', () => {
+      openConfirm({
+        title: 'Sair da conta',
+        message: 'Deseja realmente sair? Você poderá entrar novamente com seu e-mail e senha.',
+        confirmLabel: 'Sair',
+        danger: true,
+        onConfirm: async () => { if (sb) await sb.auth.signOut(); },
+      });
+    });
+
     document.getElementById('salvarMultiplicadorBtn').addEventListener('click', () => {
       const v = Number(document.getElementById('multiplicadorInput').value);
       if (!v || v <= 0) { toast('Informe um multiplicador válido.', 'danger'); return; }
       db.settings.multiplicador = v;
       saveDB();
+      renderAll(); // recalcula na hora o valor de venda em Receitas e Cálculos
       toast('Multiplicador atualizado.', 'success');
     });
 
@@ -1970,11 +2547,11 @@
         break;
       case 'favoritar-calculo':
         toggleFavoriteCalculation(id);
-        renderCalcHistory();
+        renderAll();
         break;
       case 'duplicar-calculo':
         duplicateCalculation(id);
-        renderCalcHistory();
+        renderAll();
         break;
       case 'excluir-calculo':
         openConfirm({
@@ -1982,8 +2559,18 @@
           message: 'Deseja realmente excluir este cálculo do histórico?',
           confirmLabel: 'Excluir',
           danger: true,
-          onConfirm: () => { deleteCalculation(id); renderCalcHistory(); toast('Cálculo excluído.', 'success'); },
+          onConfirm: () => { deleteCalculation(id); renderAll(); toast('Cálculo excluído.', 'success'); },
         });
+        break;
+      case 'producao-periodo':
+        currentProducaoPeriodo = el.dataset.periodo;
+        if (currentProducaoPeriodo !== 'personalizado') { producaoPeriodoCustomFrom = ''; producaoPeriodoCustomTo = ''; }
+        renderProducaoResumo();
+        break;
+      case 'financeiro-periodo':
+        currentFinanceiroPeriodo = el.dataset.periodo;
+        if (currentFinanceiroPeriodo !== 'personalizado') { financeiroPeriodoCustomFrom = ''; financeiroPeriodoCustomTo = ''; }
+        renderFinanceiro();
         break;
       case 'editar-producao':
         openEditProductionModal(id);
@@ -2009,8 +2596,74 @@
   document.getElementById('movTipoFiltro').addEventListener('change', renderMovimentacoes);
 
   /* ======================================================================
-     20. INICIALIZAÇÃO
+     20. AUTENTICAÇÃO (Supabase Auth — e-mail e senha) e INICIALIZAÇÃO
      ====================================================================== */
 
-  goToView('dashboard');
+  function setAuthMessage(msg) {
+    const el = document.getElementById('authMessage');
+    el.textContent = msg;
+    el.style.display = msg ? 'block' : 'none';
+  }
+
+  function showAuthGate() {
+    document.getElementById('authOverlay').classList.remove('hidden');
+    document.getElementById('app').style.display = 'none';
+  }
+
+  function hideAuthGate() {
+    document.getElementById('authOverlay').classList.add('hidden');
+    document.getElementById('app').style.display = '';
+  }
+
+  // Carrega os dados do usuário autenticado e só então exibe o sistema.
+  // Se o Supabase não puder ser alcançado nesse instante, usa o último
+  // cache local como rede de segurança (o Supabase continua sendo a fonte
+  // de verdade: na próxima sincronização bem-sucedida ele volta a mandar).
+  async function bootApp(user) {
+    currentUser = user;
+    try {
+      db = await loadDBFromSupabase(user.id);
+    } catch (e) {
+      console.error('Erro ao carregar dados do Supabase:', e);
+      toast('Não foi possível carregar seus dados da nuvem agora. Mostrando o último dado salvo neste dispositivo.', 'warning');
+      db = loadDBFromLocalCache();
+    }
+    migrateProductions();
+    hideAuthGate();
+    goToView('dashboard');
+  }
+
+  if (!SUPABASE_CONFIGURADO) {
+    setAuthMessage('O Supabase ainda não foi configurado neste arquivo (preencha SUPABASE_URL e SUPABASE_ANON_KEY no início do script.js).');
+  } else {
+    document.getElementById('authSignInBtn').addEventListener('click', async () => {
+      const email = document.getElementById('authEmail').value.trim();
+      const password = document.getElementById('authPassword').value;
+      if (!email || !password) { setAuthMessage('Informe e-mail e senha.'); return; }
+      setAuthMessage('Entrando...');
+      const { error } = await sb.auth.signInWithPassword({ email, password });
+      if (error) setAuthMessage(error.message);
+    });
+
+    document.getElementById('authSignUpBtn').addEventListener('click', async () => {
+      const email = document.getElementById('authEmail').value.trim();
+      const password = document.getElementById('authPassword').value;
+      if (!email || !password) { setAuthMessage('Informe e-mail e senha.'); return; }
+      if (password.length < 6) { setAuthMessage('A senha deve ter ao menos 6 caracteres.'); return; }
+      setAuthMessage('Criando conta...');
+      const { error } = await sb.auth.signUp({ email, password });
+      if (error) { setAuthMessage(error.message); return; }
+      setAuthMessage('Conta criada. Se a confirmação por e-mail estiver ativa no projeto, confirme antes de entrar.');
+    });
+
+    sb.auth.onAuthStateChange((_event, session) => {
+      if (session && session.user) bootApp(session.user);
+      else { currentUser = null; showAuthGate(); }
+    });
+
+    sb.auth.getSession().then(({ data }) => {
+      if (data && data.session && data.session.user) bootApp(data.session.user);
+      else showAuthGate();
+    });
+  }
 })();

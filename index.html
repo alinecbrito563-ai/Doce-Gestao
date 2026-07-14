@@ -8,7 +8,34 @@
 </head>
 <body>
 
-<div id="app">
+<!-- ===================== LOGIN (Supabase Auth) ===================== -->
+<!-- Reaproveita as classes .modal-overlay/.modal-box já usadas nos modais do sistema. -->
+<div class="modal-overlay" id="authOverlay">
+  <div class="modal-box" id="authBox" style="max-width:400px;">
+    <div class="modal-header">
+      <h2>Entrar no DoceGestão</h2>
+    </div>
+    <div class="modal-body">
+      <div class="form-grid">
+        <div class="field span-2">
+          <label>E-mail</label>
+          <input type="email" id="authEmail" placeholder="voce@exemplo.com" autocomplete="username">
+        </div>
+        <div class="field span-2">
+          <label>Senha</label>
+          <input type="password" id="authPassword" placeholder="Mínimo 6 caracteres" autocomplete="current-password">
+        </div>
+      </div>
+      <p class="confirm-text" id="authMessage" style="margin-top:12px; display:none;"></p>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="authSignUpBtn" type="button">Criar conta</button>
+      <button class="btn btn-primary" id="authSignInBtn" type="button">Entrar</button>
+    </div>
+  </div>
+</div>
+
+<div id="app" style="display:none;">
 
   <!-- ===================== SIDEBAR ===================== -->
   <aside id="sidebar">
@@ -50,6 +77,10 @@
       <button class="nav-item" data-view="movimentacoes" data-action="ir-para-view">
         <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7h13l-3-3M17 17H4l3 3"/></svg>
         <span>Movimentações</span>
+      </button>
+      <button class="nav-item" data-view="financeiro" data-action="ir-para-view">
+        <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20M17 6.5c0-1.9-2-3-5-3s-5 1.3-5 3.3 2 2.9 5 3.4 5 1.3 5 3.4S14 17 12 17s-5-1-5-3"/></svg>
+        <span>Financeiro</span>
       </button>
       <button class="nav-item" data-view="configuracoes" data-action="ir-para-view">
         <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 13a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.56V19a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1H4a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.56-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34H10a1.7 1.7 0 0 0 1-1.56V4a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87V10a1.7 1.7 0 0 0 1.56 1H20a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.56 1Z"/></svg>
@@ -118,6 +149,7 @@
 
     <!-- PRODUÇÕES -->
     <section class="view" id="view-producoes">
+      <div id="producaoResumo"></div>
       <div class="panel" id="producaoFormContainer"></div>
       <h2 class="section-title">Produções registradas</h2>
       <div class="producoes-list" id="producoesList"></div>
@@ -142,6 +174,11 @@
         </select>
       </div>
       <div class="statement" id="movimentacoesList"></div>
+    </section>
+
+    <!-- FINANCEIRO -->
+    <section class="view" id="view-financeiro">
+      <div id="financeiroContainer"></div>
     </section>
 
     <!-- CONFIGURAÇÕES -->
@@ -178,6 +215,9 @@
   <button class="nav-item" data-view="movimentacoes" data-action="ir-para-view">
     <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7h13l-3-3M17 17H4l3 3"/></svg>
   </button>
+  <button class="nav-item" data-view="financeiro" data-action="ir-para-view">
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20M17 6.5c0-1.9-2-3-5-3s-5 1.3-5 3.3 2 2.9 5 3.4 5 1.3 5 3.4S14 17 12 17s-5-1-5-3"/></svg>
+  </button>
   <button class="nav-item" data-view="configuracoes" data-action="ir-para-view">
     <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 13a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.56V19a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1H4a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.56-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34H10a1.7 1.7 0 0 0 1-1.56V4a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87V10a1.7 1.7 0 0 0 1.56 1H20a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.56 1Z"/></svg>
   </button>
@@ -185,6 +225,8 @@
 
 <input type="file" id="importFileInput" accept="application/json" style="display:none">
 
+<!-- Cliente Supabase (necessário para autenticação e armazenamento na nuvem) -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <script src="script.js"></script>
 </body>
 </html>
