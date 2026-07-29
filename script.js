@@ -704,6 +704,7 @@
       nome: data.nome.trim(),
       ingredientes: data.ingredientes || [],
       rendimento: Number(data.rendimento) || 1,
+      pesoUnitarioPadrao: Number(data.pesoUnitarioPadrao) || 0,
       favorita: false,
       observacoes: data.observacoes || '',
       criadoEm: Date.now(),
@@ -719,6 +720,7 @@
     r.nome = data.nome.trim();
     r.ingredientes = data.ingredientes || [];
     r.rendimento = Number(data.rendimento) || 1;
+    r.pesoUnitarioPadrao = Number(data.pesoUnitarioPadrao) || 0;
     r.observacoes = data.observacoes || '';
     saveDB();
   }
@@ -752,6 +754,17 @@
   function migrateProductions() {
     let changed = false;
     db.productions.forEach((p) => {
+      if (typeof p.quantidadeReceitas !== 'number') {
+        const receita = getRecipe(p.receitaId);
+        const rendimentoPadrao = receita ? (Number(receita.rendimento) || 1) : 1;
+        p.quantidadeReceitas = (Number(p.quantidadeProduzida) || rendimentoPadrao) / rendimentoPadrao;
+        changed = true;
+      }
+      if (typeof p.pesoUnitario !== 'number') {
+        const receita = getRecipe(p.receitaId);
+        p.pesoUnitario = receita ? (Number(receita.pesoUnitarioPadrao) || 0) : 0;
+        changed = true;
+      }
       if (typeof p.custoTotal !== 'number' || typeof p.custoNaoRegistrado === 'undefined') {
         if (Array.isArray(p.consumos) && p.consumos.length) {
           let total = 0;
@@ -803,16 +816,15 @@
     return `Estoque insuficiente para: ${partes.join('; ')}.`;
   }
 
-  // Calcula, para uma receita + quantidade produzida, o total necessário de
-  // cada ingrediente (agregando linhas repetidas), já convertido para a base
-  // de estoque do próprio ingrediente.
-  function computeNeededByIngredient(recipe, quantidadeProduzida) {
-    const rendimento = Number(recipe.rendimento) || 1;
-    const fator = quantidadeProduzida / rendimento;
+  // Calcula o total necessário de cada ingrediente conforme a quantidade de
+  // receitas completas feitas. O rendimento real não altera o consumo: ele
+  // serve para calcular o custo por unidade daquela produção específica.
+  function computeNeededByIngredient(recipe, quantidadeReceitas) {
+    const fator = Number(quantidadeReceitas) || 0;
     const neededByIngredient = {};
     recipe.ingredientes.forEach((item) => {
       const ing = getIngredient(item.ingredienteId);
-      if (!ing) return; // ingrediente pode ter sido removido da receita/estoque anteriormente
+      if (!ing) return;
       const usageBase = usageToBaseForIngredient(ing, item.quantidade, item.unidade) * fator;
       neededByIngredient[item.ingredienteId] = (neededByIngredient[item.ingredienteId] || 0) + usageBase;
     });
@@ -822,8 +834,8 @@
   // Verifica se uma produção é viável SEM alterar nada no banco de dados.
   // extraByIngredient (opcional) simula estoque adicional que seria devolvido
   // pela reversão de uma produção antiga, usado ao editar uma produção.
-  function validateProductionFeasibility(recipe, quantidadeProduzida, extraByIngredient) {
-    const neededByIngredient = computeNeededByIngredient(recipe, quantidadeProduzida);
+  function validateProductionFeasibility(recipe, quantidadeReceitas, extraByIngredient) {
+    const neededByIngredient = computeNeededByIngredient(recipe, quantidadeReceitas);
     const faltas = [];
     Object.keys(neededByIngredient).forEach((ingId) => {
       const extra = extraByIngredient ? extraByIngredient[ingId] : null;
@@ -863,10 +875,14 @@
   function registerProduction(data) {
     const recipe = getRecipe(data.receitaId);
     if (!recipe) { toast('Selecione uma receita válida.', 'danger'); return null; }
+    const quantidadeReceitas = Number(data.quantidadeReceitas) || 0;
     const quantidadeProduzida = Number(data.quantidadeProduzida) || 0;
-    if (quantidadeProduzida <= 0) { toast('Informe uma quantidade produzida maior que zero.', 'danger'); return null; }
+    const pesoUnitario = Number(data.pesoUnitario) || 0;
+    if (quantidadeReceitas <= 0) { toast('Informe quantas receitas foram feitas.', 'danger'); return null; }
+    if (quantidadeProduzida <= 0) { toast('Informe o rendimento real em unidades.', 'danger'); return null; }
+    if (pesoUnitario < 0) { toast('O peso por unidade não pode ser negativo.', 'danger'); return null; }
 
-    const feasibility = validateProductionFeasibility(recipe, quantidadeProduzida);
+    const feasibility = validateProductionFeasibility(recipe, quantidadeReceitas);
     if (!feasibility.ok) {
       // Nada foi alterado no estoque: a operação inteira é cancelada.
       toast(buildFaltaMessage(feasibility.faltas), 'danger');
@@ -878,7 +894,9 @@
       id: uid(),
       receitaId: recipe.id,
       receitaNome: recipe.nome,
+      quantidadeReceitas,
       quantidadeProduzida,
+      pesoUnitario,
       data: data.data || todayISO(),
       observacoes: data.observacoes || '',
       quantidadeVendida: 0,
@@ -978,8 +996,12 @@
     if (!production) return { ok: false, message: 'Produção não encontrada.' };
     const newRecipe = getRecipe(data.receitaId);
     if (!newRecipe) return { ok: false, message: 'Selecione uma receita válida.' };
+    const newQuantidadeReceitas = Number(data.quantidadeReceitas) || 0;
     const newQuantidade = Number(data.quantidadeProduzida) || 0;
-    if (newQuantidade <= 0) return { ok: false, message: 'Informe uma quantidade produzida maior que zero.' };
+    const newPesoUnitario = Number(data.pesoUnitario) || 0;
+    if (newQuantidadeReceitas <= 0) return { ok: false, message: 'Informe quantas receitas foram feitas.' };
+    if (newQuantidade <= 0) return { ok: false, message: 'Informe o rendimento real em unidades.' };
+    if (newPesoUnitario < 0) return { ok: false, message: 'O peso por unidade não pode ser negativo.' };
 
     // Mapa do que seria devolvido, por ingrediente e por lote, se a produção
     // antiga fosse estornada agora.
@@ -989,7 +1011,7 @@
       item.lots.forEach((l) => { map[l.purchaseId] = (map[l.purchaseId] || 0) + l.quantidadeBase; });
     });
 
-    const feasibility = validateProductionFeasibility(newRecipe, newQuantidade, extraByIngredient);
+    const feasibility = validateProductionFeasibility(newRecipe, newQuantidadeReceitas, extraByIngredient);
     if (!feasibility.ok) {
       // Nada foi alterado: a produção antiga continua exatamente como estava.
       return { ok: false, message: buildFaltaMessage(feasibility.faltas) };
@@ -997,11 +1019,13 @@
 
     // Só agora, com a certeza de que a nova produção cabe, mutamos de fato:
     reverseProduction(production, { silent: true });
-    const applied = applyProductionConsumption(newRecipe, computeNeededByIngredient(newRecipe, newQuantidade), data.data);
+    const applied = applyProductionConsumption(newRecipe, computeNeededByIngredient(newRecipe, newQuantidadeReceitas), data.data);
 
     production.receitaId = newRecipe.id;
     production.receitaNome = newRecipe.nome;
+    production.quantidadeReceitas = newQuantidadeReceitas;
     production.quantidadeProduzida = newQuantidade;
+    production.pesoUnitario = newPesoUnitario;
     production.data = data.data || production.data;
     production.observacoes = data.observacoes || '';
     production.consumos = applied.consumos;
@@ -1545,7 +1569,7 @@
           <div class="recipe-card-top">
             <h3><button class="star-btn" data-action="favoritar-receita" data-id="${r.id}" title="Favoritar">${r.favorita ? ICONS.starFilled : ICONS.star}</button> ${escapeHtml(r.nome)}</h3>
           </div>
-          <div class="ing-meta"><span>${r.ingredientes.length} ingrediente(s)</span><span>Rende ${formatNumber(r.rendimento, 0)} un.</span></div>
+          <div class="ing-meta"><span>${r.ingredientes.length} ingrediente(s)</span><span>Rende ${formatNumber(r.rendimento, 0)} un.${r.pesoUnitarioPadrao ? ` de ${formatNumber(r.pesoUnitarioPadrao, 0)} g` : ''}</span></div>
           <div class="recipe-price-row"><span>Custo total</span><b>${formatMoney(cost.custoTotal)}</b></div>
           <div class="recipe-price-row"><span>Custo por unidade</span><b>${formatMoney(cost.custoUnitario)}</b></div>
           <div class="recipe-sell">${formatMoney(cost.valorVendaUnitario)} <span style="font-size:11px; color:var(--muted); font-family:var(--font-body);">venda/un.</span></div>
@@ -1661,8 +1685,12 @@
             <input type="text" id="rNome" value="${editing ? escapeHtml(editing.nome) : ''}" placeholder="Ex.: Brigadeiro tradicional">
           </div>
           <div class="field">
-            <label>Rendimento (unidades produzidas)</label>
+            <label>Rendimento padrão (unidades)</label>
             <input type="number" min="1" step="any" id="rRendimento" value="${editing ? editing.rendimento : ''}" placeholder="Ex.: 30">
+          </div>
+          <div class="field">
+            <label>Peso padrão por unidade (g)</label>
+            <input type="number" min="0" step="any" id="rPesoUnitario" value="${editing && editing.pesoUnitarioPadrao ? editing.pesoUnitarioPadrao : ''}" placeholder="Ex.: 18">
           </div>
         </div>
         <h2 class="section-title" style="font-size:15px; margin:18px 0 6px;">Ingredientes da receita</h2>
@@ -1697,10 +1725,11 @@
         document.getElementById('saveRecipeBtn').addEventListener('click', () => {
           const nome = document.getElementById('rNome').value.trim();
           const rendimento = document.getElementById('rRendimento').value;
+          const pesoUnitarioPadrao = document.getElementById('rPesoUnitario').value;
           if (!nome) { toast('Informe o nome da receita.', 'danger'); return; }
           if (!rendimento || Number(rendimento) <= 0) { toast('Informe um rendimento válido.', 'danger'); return; }
           const data = {
-            nome, rendimento, ingredientes: collectValidRows(),
+            nome, rendimento, pesoUnitarioPadrao, ingredientes: collectValidRows(),
             observacoes: document.getElementById('rObs').value,
           };
           if (editing) updateRecipe(editing.id, data); else addRecipe(data);
@@ -2002,19 +2031,30 @@
       <h2 class="section-title" style="margin-top:0;">Registrar nova produção</h2>
       <div class="form-grid cols-3">
         <div class="field"><label>Receita</label><select id="pReceita">${db.recipes.map((r) => `<option value="${r.id}">${escapeHtml(r.nome)}</option>`).join('')}</select></div>
-        <div class="field"><label>Quantidade produzida</label><input type="number" min="1" step="any" id="pQuantidade" value="1"></div>
+        <div class="field"><label>Quantidade de receitas feitas</label><input type="number" min="0.01" step="any" id="pQuantidadeReceitas" value="1"></div>
+        <div class="field"><label>Rendimento real (unidades)</label><input type="number" min="1" step="any" id="pQuantidade" value="${db.recipes[0] ? db.recipes[0].rendimento : 1}"></div>
+        <div class="field"><label>Peso por unidade (g)</label><input type="number" min="0" step="any" id="pPesoUnitario" value="${db.recipes[0] && db.recipes[0].pesoUnitarioPadrao ? db.recipes[0].pesoUnitarioPadrao : ''}" placeholder="Ex.: 18"></div>
         <div class="field"><label>Data</label><input type="date" id="pData" value="${todayISO()}"></div>
         <div class="field span-2"><label>Observações</label><input type="text" id="pObs" placeholder="Opcional"></div>
       </div>
       <div class="form-actions"><button class="btn btn-primary" id="registrarProducaoBtn">${ICONS.factory} Registrar produção</button></div>
     `;
+    document.getElementById('pReceita').addEventListener('change', (e) => {
+      const receita = getRecipe(e.target.value);
+      if (!receita) return;
+      document.getElementById('pQuantidade').value = receita.rendimento || 1;
+      document.getElementById('pPesoUnitario').value = receita.pesoUnitarioPadrao || '';
+    });
     document.getElementById('registrarProducaoBtn').addEventListener('click', () => {
       const receitaId = document.getElementById('pReceita').value;
+      const quantidadeReceitas = document.getElementById('pQuantidadeReceitas').value;
       const quantidadeProduzida = document.getElementById('pQuantidade').value;
+      const pesoUnitario = document.getElementById('pPesoUnitario').value;
       const data = document.getElementById('pData').value;
       const observacoes = document.getElementById('pObs').value;
-      if (!quantidadeProduzida || Number(quantidadeProduzida) <= 0) { toast('Informe uma quantidade válida.', 'danger'); return; }
-      registerProduction({ receitaId, quantidadeProduzida, data, observacoes });
+      if (!quantidadeReceitas || Number(quantidadeReceitas) <= 0) { toast('Informe quantas receitas foram feitas.', 'danger'); return; }
+      if (!quantidadeProduzida || Number(quantidadeProduzida) <= 0) { toast('Informe o rendimento real.', 'danger'); return; }
+      registerProduction({ receitaId, quantidadeReceitas, quantidadeProduzida, pesoUnitario, data, observacoes });
       renderProducaoForm(); // reseta o formulário para a próxima produção
       renderAll();
     });
@@ -2032,8 +2072,8 @@
       return `
       <div class="producao-item" data-id="${p.id}">
         <div class="info">
-          <strong>${escapeHtml(p.receitaNome)} · ${formatNumber(p.quantidadeProduzida, 0)} un.</strong>
-          <div>${formatDateBR(p.data)}${p.observacoes ? ' — ' + escapeHtml(p.observacoes) : ''}</div>
+          <strong>${escapeHtml(p.receitaNome)} · ${formatNumber(p.quantidadeProduzida, 0)} un.${p.pesoUnitario ? ` de ${formatNumber(p.pesoUnitario, 0)} g` : ''}</strong>
+          <div>${formatNumber(p.quantidadeReceitas || 1, 2)} receita(s) · ${formatDateBR(p.data)}${p.observacoes ? ' — ' + escapeHtml(p.observacoes) : ''}</div>
         </div>
         <div class="form-grid cols-3" style="margin:10px 0;">
           <div class="field">
@@ -2100,7 +2140,9 @@
       bodyHTML: `
         <div class="form-grid cols-3">
           <div class="field"><label>Receita</label><select id="epReceita">${db.recipes.map((r) => `<option value="${r.id}" ${r.id === production.receitaId ? 'selected' : ''}>${escapeHtml(r.nome)}</option>`).join('')}</select></div>
-          <div class="field"><label>Quantidade produzida</label><input type="number" min="1" step="any" id="epQuantidade" value="${production.quantidadeProduzida}"></div>
+          <div class="field"><label>Quantidade de receitas feitas</label><input type="number" min="0.01" step="any" id="epQuantidadeReceitas" value="${production.quantidadeReceitas || 1}"></div>
+          <div class="field"><label>Rendimento real (unidades)</label><input type="number" min="1" step="any" id="epQuantidade" value="${production.quantidadeProduzida}"></div>
+          <div class="field"><label>Peso por unidade (g)</label><input type="number" min="0" step="any" id="epPesoUnitario" value="${production.pesoUnitario || ''}"></div>
           <div class="field"><label>Data</label><input type="date" id="epData" value="${production.data}"></div>
           <div class="field span-2"><label>Observações</label><input type="text" id="epObs" value="${escapeHtml(production.observacoes || '')}"></div>
         </div>
@@ -2115,7 +2157,9 @@
         document.getElementById('saveEditProductionBtn').addEventListener('click', () => {
           const data = {
             receitaId: document.getElementById('epReceita').value,
+            quantidadeReceitas: document.getElementById('epQuantidadeReceitas').value,
             quantidadeProduzida: document.getElementById('epQuantidade').value,
+            pesoUnitario: document.getElementById('epPesoUnitario').value,
             data: document.getElementById('epData').value,
             observacoes: document.getElementById('epObs').value,
           };
@@ -2345,7 +2389,7 @@
       <div class="producao-item">
         <div class="info">
           <strong>${escapeHtml(p.receitaNome)} <span class="tag-badge tag-${status.level}">${status.label}</span></strong>
-          <div>${formatDateBR(p.data)} · ${formatNumber(p.quantidadeProduzida, 0)} produzidas · ${formatNumber(p.quantidadeVendida || 0, 0)} vendidas · ${formatNumber(m.quantidadeRestante, 0)} restantes</div>
+          <div>${formatDateBR(p.data)} · ${formatNumber(p.quantidadeReceitas || 1, 2)} receita(s) · ${formatNumber(p.quantidadeProduzida, 0)} produzidas${p.pesoUnitario ? ` de ${formatNumber(p.pesoUnitario, 0)} g` : ''} · ${formatNumber(p.quantidadeVendida || 0, 0)} vendidas · ${formatNumber(m.quantidadeRestante, 0)} restantes</div>
         </div>
         <div style="flex:1; min-width:220px;">
           ${!m.custoRegistrado ? `<div class="recipe-price-row"><span>Custo</span><b>Custo não registrado</b></div>` : `
