@@ -2023,19 +2023,39 @@
         }));
         updateCaixaPreview();
       };
-      const updateCaixaPreview = () => {
-        let custo = 0;
-        currentCaixaItems.forEach((item) => {
-          const r = getRecipe(item.receitaId);
-          if (!r) return;
+      const readCaixaCalculation = () => {
+        let custoBrigadeirosPorCaixa = 0;
+        const itens = [];
+        document.querySelectorAll('#caixaRows .caixa-item-row').forEach((row) => {
+          const receitaId = row.querySelector('[data-role="caixa-receita"]')?.value;
+          const quantidade = Number(row.querySelector('[data-role="caixa-qtd"]')?.value) || 0;
+          const r = getRecipe(receitaId);
+          if (!r || quantidade <= 0) return;
           const cost = computeRecipeCost(r);
-          custo += cost.custoUnitario * (Number(item.quantidade) || 0);
+          const subtotal = cost.custoUnitario * quantidade;
+          custoBrigadeirosPorCaixa += subtotal;
+          itens.push({ receitaId: r.id, receitaNome: r.nome, quantidade, custoUnitario: cost.custoUnitario, subtotal });
         });
-        const quantidadeCaixas = Number(document.getElementById('calcCaixaQuantidade') ? document.getElementById('calcCaixaQuantidade').value : 1) || 1;
-        const embalagem = Number(document.getElementById('calcCaixaEmbalagem') ? document.getElementById('calcCaixaEmbalagem').value : 0) || 0;
-        custo = (custo + embalagem) * quantidadeCaixas;
+        const quantidadeCaixas = Math.max(1, Number(document.getElementById('calcCaixaQuantidade')?.value) || 1);
+        const embalagemPorCaixa = Math.max(0, Number(document.getElementById('calcCaixaEmbalagem')?.value) || 0);
+        const custoPorCaixa = custoBrigadeirosPorCaixa + embalagemPorCaixa;
+        const custoTotal = custoPorCaixa * quantidadeCaixas;
+        return { itens, quantidadeCaixas, embalagemPorCaixa, custoBrigadeirosPorCaixa, custoPorCaixa, custoTotal };
+      };
+      const updateCaixaPreview = () => {
+        const calc = readCaixaCalculation();
         const mult = Number(db.settings.multiplicador) || 3;
-        document.getElementById('calcPreview').innerHTML = previewHTML(custo, custo * mult);
+        const detalhes = calc.itens.map((item) => `
+          <div class="item"><span>${formatNumber(item.quantidade, 0)}x ${escapeHtml(item.receitaNome)} (${formatMoney(item.custoUnitario)} cada)</span><b>${formatMoney(item.subtotal)}</b></div>
+        `).join('');
+        document.getElementById('calcPreview').innerHTML = `
+          ${detalhes}
+          <div class="item"><span>Brigadeiros por caixa</span><b>${formatMoney(calc.custoBrigadeirosPorCaixa)}</b></div>
+          <div class="item"><span>Embalagem por caixa</span><b>${formatMoney(calc.embalagemPorCaixa)}</b></div>
+          <div class="item"><span>Custo por caixa</span><b>${formatMoney(calc.custoPorCaixa)}</b></div>
+          <div class="item"><span>Custo total (${formatNumber(calc.quantidadeCaixas, 0)} caixa(s))</span><b>${formatMoney(calc.custoTotal)}</b></div>
+          <div class="item"><span>Valor de venda sugerido</span><b>${formatMoney(calc.custoTotal * mult)}</b></div>
+        `;
       };
       container.innerHTML = `
         <div id="caixaRows"></div>
@@ -2055,25 +2075,18 @@
         renderCaixaRows();
       });
       document.getElementById('calcSalvarBtn').addEventListener('click', () => {
-        let custo = 0;
-        const detalheItens = [];
-        currentCaixaItems.forEach((item) => {
-          const r = getRecipe(item.receitaId);
-          if (!r) return;
-          const cost = computeRecipeCost(r);
-          const itemCusto = cost.custoUnitario * (Number(item.quantidade) || 0);
-          custo += itemCusto;
-          detalheItens.push({ receitaNome: r.nome, quantidade: item.quantidade });
-        });
-        const quantidadeCaixas = Number(document.getElementById('calcCaixaQuantidade').value) || 1;
-        const embalagem = Number(document.getElementById('calcCaixaEmbalagem').value) || 0;
-        custo = (custo + embalagem) * quantidadeCaixas;
+        const calc = readCaixaCalculation();
+        const detalheItens = calc.itens.map((i) => ({ receitaId: i.receitaId, receitaNome: i.receitaNome, quantidade: i.quantidade, custoUnitario: i.custoUnitario, subtotal: i.subtotal }));
+        if (!detalheItens.length) {
+          toast('Adicione pelo menos um sabor à caixa.', 'error');
+          return;
+        }
         const mult = Number(db.settings.multiplicador) || 3;
         addCalculation({
           tipo: 'caixa',
-          titulo: `${formatNumber(quantidadeCaixas, 0)} caixa(s) mista(s) (${detalheItens.map((i) => i.quantidade + 'x ' + i.receitaNome).join(', ')})`,
-          detalhes: { itens: detalheItens, quantidadeCaixas, embalagem },
-          custoTotal: custo, valorVenda: custo * mult,
+          titulo: `${formatNumber(calc.quantidadeCaixas, 0)} caixa(s) mista(s) (${detalheItens.map((i) => i.quantidade + 'x ' + i.receitaNome).join(', ')})`,
+          detalhes: { itens: detalheItens, quantidadeCaixas: calc.quantidadeCaixas, embalagem: calc.embalagemPorCaixa, custoPorCaixa: calc.custoPorCaixa },
+          custoTotal: calc.custoTotal, valorVenda: calc.custoTotal * mult,
         });
         currentCaixaItems = [];
         renderCalcForm();
