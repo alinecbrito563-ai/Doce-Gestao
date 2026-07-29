@@ -70,7 +70,7 @@
       productions: [],
       movements: [],
       calculations: [],
-      settings: { multiplicador: 3 },
+      settings: { multiplicador: 3, caixasMistas: [] },
     };
   }
 
@@ -114,7 +114,7 @@
     tabelaResults.forEach((r) => { if (r.error) throw r.error; });
     const settingsRes = await sb.from('user_settings').select('payload').eq('user_id', userId).maybeSingle();
     if (settingsRes.error) throw settingsRes.error;
-    const loaded = { settings: (settingsRes.data && settingsRes.data.payload) ? settingsRes.data.payload : { multiplicador: 3 } };
+    const loaded = { settings: (settingsRes.data && settingsRes.data.payload) ? settingsRes.data.payload : { multiplicador: 3, caixasMistas: [] } };
     TABELAS.forEach((t, i) => { loaded[t] = (tabelaResults[i].data || []).map((r) => r.payload); });
     return Object.assign(defaultDB(), loaded);
   }
@@ -753,6 +753,8 @@
   //     nunca um número inventado.
   function migrateProductions() {
     let changed = false;
+    if (!db.settings) { db.settings = { multiplicador: 3, caixasMistas: [] }; changed = true; }
+    if (!Array.isArray(db.settings.caixasMistas)) { db.settings.caixasMistas = []; changed = true; }
     db.productions.forEach((p) => {
       if (typeof p.quantidadeReceitas !== 'number') {
         const receita = getRecipe(p.receitaId);
@@ -932,7 +934,8 @@
     const faturamento = precoVendaUnitario * quantidadeVendida;
     const lucro = custoRegistrado ? faturamento - custoVendido : 0;
     const margemLucro = custoRegistrado && faturamento > 0 ? (lucro / faturamento) * 100 : 0;
-    const quantidadeRestante = Math.max(0, quantidadeProduzida - quantidadeVendida);
+    const quantidadeAlocadaCaixas = typeof getAllocatedFromProduction === 'function' ? getAllocatedFromProduction(production.id) : 0;
+    const quantidadeRestante = Math.max(0, quantidadeProduzida - quantidadeVendida - quantidadeAlocadaCaixas);
     return { custoTotal, custoUnitario, custoVendido, faturamento, lucro, margemLucro, quantidadeRestante, custoRegistrado };
   }
 
@@ -943,8 +946,10 @@
     if (!p) return { ok: false, message: 'Produção não encontrada.' };
     const qtd = Number(quantidadeVendida) || 0;
     if (qtd < 0) return { ok: false, message: 'A quantidade vendida não pode ser negativa.' };
-    if (qtd > (Number(p.quantidadeProduzida) || 0) + EPS) {
-      return { ok: false, message: `A quantidade vendida não pode ser maior do que a quantidade produzida (${formatNumber(p.quantidadeProduzida, 0)} un.).` };
+    const allocatedToBoxes = getAllocatedFromProduction(p.id);
+    const maxDirectSale = Math.max(0, (Number(p.quantidadeProduzida) || 0) - allocatedToBoxes);
+    if (qtd > maxDirectSale + EPS) {
+      return { ok: false, message: `Esta produção possui ${formatNumber(allocatedToBoxes, 0)} unidade(s) reservadas em caixas. A venda avulsa máxima é ${formatNumber(maxDirectSale, 0)} un.` };
     }
     const preco = Number(precoVendaUnitario) || 0;
     if (preco < 0) return { ok: false, message: 'O preço de venda não pode ser negativo.' };
@@ -980,10 +985,13 @@
 
   function deleteProduction(id) {
     const production = db.productions.find((p) => p.id === id);
-    if (!production) return;
+    if (!production) return { ok: false, message: 'Produção não encontrada.' };
+    const allocated = getAllocatedFromProduction(id);
+    if (allocated > EPS) return { ok: false, message: `Esta produção possui ${formatNumber(allocated, 0)} unidade(s) usadas em caixas. Exclua primeiro as caixas relacionadas.` };
     reverseProduction(production);
     db.productions = db.productions.filter((p) => p.id !== id);
     saveDB();
+    return { ok: true };
   }
 
   // Edita uma produção já registrada: primeiro valida se a NOVA receita/
@@ -994,6 +1002,8 @@
   function updateProduction(id, data) {
     const production = db.productions.find((p) => p.id === id);
     if (!production) return { ok: false, message: 'Produção não encontrada.' };
+    const allocated = getAllocatedFromProduction(id);
+    if (allocated > EPS) return { ok: false, message: `Esta produção possui ${formatNumber(allocated, 0)} unidade(s) usadas em caixas. Exclua primeiro as caixas relacionadas para editar.` };
     const newRecipe = getRecipe(data.receitaId);
     if (!newRecipe) return { ok: false, message: 'Selecione uma receita válida.' };
     const newQuantidadeReceitas = Number(data.quantidadeReceitas) || 0;
@@ -1042,6 +1052,145 @@
     }
     saveDB();
     return { ok: true };
+  }
+
+
+  /* ======================================================================
+     9.1 CAIXAS MISTAS E ESTOQUE DE PRODUTOS PRONTOS
+     ====================================================================== */
+
+  function getMixedBoxes() {
+    if (!db.settings.caixasMistas) db.settings.caixasMistas = [];
+    return db.settings.caixasMistas;
+  }
+
+  function getAllocatedFromProduction(productionId, ignoreBoxId) {
+    return getMixedBoxes().reduce((total, box) => {
+      if (ignoreBoxId && box.id === ignoreBoxId) return total;
+      return total + (box.alocacoes || [])
+        .filter((a) => a.productionId === productionId)
+        .reduce((s, a) => s + (Number(a.quantidade) || 0), 0);
+    }, 0);
+  }
+
+  function getProductionReadyAvailable(production, ignoreBoxId) {
+    const produced = Number(production.quantidadeProduzida) || 0;
+    const soldDirect = Number(production.quantidadeVendida) || 0;
+    const allocated = getAllocatedFromProduction(production.id, ignoreBoxId);
+    return Math.max(0, produced - soldDirect - allocated);
+  }
+
+  function getReadyStockByRecipe(recipeId, ignoreBoxId) {
+    return db.productions
+      .filter((p) => p.receitaId === recipeId)
+      .reduce((s, p) => s + getProductionReadyAvailable(p, ignoreBoxId), 0);
+  }
+
+  function planReadyProductConsumption(recipeId, quantityNeeded, ignoreBoxId) {
+    let remaining = Number(quantityNeeded) || 0;
+    const allocations = [];
+    const productions = db.productions
+      .filter((p) => p.receitaId === recipeId)
+      .sort((a, b) => (a.data < b.data ? -1 : a.data > b.data ? 1 : a.criadoEm - b.criadoEm));
+
+    for (const p of productions) {
+      if (remaining <= EPS) break;
+      const available = getProductionReadyAvailable(p, ignoreBoxId);
+      if (available <= EPS) continue;
+      const take = Math.min(available, remaining);
+      const m = computeProductionMetrics(p);
+      allocations.push({
+        productionId: p.id,
+        receitaId: p.receitaId,
+        receitaNome: p.receitaNome,
+        quantidade: take,
+        custoUnitario: m.custoRegistrado ? m.custoUnitario : 0,
+        custoNaoRegistrado: !m.custoRegistrado,
+      });
+      remaining -= take;
+    }
+    return { ok: remaining <= EPS, faltante: Math.max(0, remaining), allocations };
+  }
+
+  function registerMixedBox(data) {
+    const quantidadeCaixas = Number(data.quantidadeCaixas) || 0;
+    if (quantidadeCaixas <= 0) return { ok: false, message: 'Informe quantas caixas foram montadas.' };
+    const itens = (data.itens || []).filter((i) => i.receitaId && Number(i.quantidadePorCaixa) > 0);
+    if (!itens.length) return { ok: false, message: 'Adicione pelo menos um sabor à caixa.' };
+
+    const aggregated = {};
+    itens.forEach((i) => {
+      aggregated[i.receitaId] = (aggregated[i.receitaId] || 0) + Number(i.quantidadePorCaixa);
+    });
+
+    const allAllocations = [];
+    const normalizedItems = [];
+    for (const recipeId of Object.keys(aggregated)) {
+      const recipe = getRecipe(recipeId);
+      if (!recipe) return { ok: false, message: 'Uma das receitas selecionadas não existe mais.' };
+      const perBox = aggregated[recipeId];
+      const totalNeeded = perBox * quantidadeCaixas;
+      const plan = planReadyProductConsumption(recipeId, totalNeeded);
+      if (!plan.ok) {
+        return { ok: false, message: `Não há ${recipe.nome} suficiente no estoque pronto. Faltam ${formatNumber(plan.faltante, 0)} unidade(s).` };
+      }
+      normalizedItems.push({ receitaId: recipeId, receitaNome: recipe.nome, quantidadePorCaixa: perBox, quantidadeTotal: totalNeeded });
+      allAllocations.push(...plan.allocations);
+    }
+
+    const custoBrigadeiros = allAllocations.reduce((s, a) => s + (a.quantidade * a.custoUnitario), 0);
+    const custoEmbalagemUnitario = Number(data.custoEmbalagemUnitario) || 0;
+    const custoTotal = custoBrigadeiros + custoEmbalagemUnitario * quantidadeCaixas;
+    const custoNaoRegistrado = allAllocations.some((a) => a.custoNaoRegistrado);
+    const box = {
+      id: uid(),
+      nome: (data.nome || '').trim() || 'Caixa mista',
+      itens: normalizedItems,
+      alocacoes: allAllocations,
+      quantidadeCaixas,
+      quantidadeVendida: 0,
+      precoVendaUnitario: Number(data.precoVendaUnitario) || 0,
+      custoEmbalagemUnitario,
+      custoTotal,
+      custoNaoRegistrado,
+      data: data.data || todayISO(),
+      dataVenda: '',
+      observacoes: data.observacoes || '',
+      criadoEm: Date.now(),
+    };
+    getMixedBoxes().push(box);
+    saveDB();
+    return { ok: true, box };
+  }
+
+  function computeMixedBoxMetrics(box) {
+    const quantidade = Number(box.quantidadeCaixas) || 0;
+    const vendida = Number(box.quantidadeVendida) || 0;
+    const preco = Number(box.precoVendaUnitario) || 0;
+    const custoRegistrado = typeof box.custoTotal === 'number' && !box.custoNaoRegistrado;
+    const custoTotal = custoRegistrado ? box.custoTotal : 0;
+    const custoUnitario = custoRegistrado && quantidade > 0 ? custoTotal / quantidade : 0;
+    const custoVendido = custoUnitario * vendida;
+    const faturamento = preco * vendida;
+    const lucro = custoRegistrado ? faturamento - custoVendido : 0;
+    return { custoRegistrado, custoTotal, custoUnitario, custoVendido, faturamento, lucro, restante: Math.max(0, quantidade - vendida) };
+  }
+
+  function updateMixedBoxSales(id, data) {
+    const box = getMixedBoxes().find((b) => b.id === id);
+    if (!box) return { ok: false, message: 'Caixa não encontrada.' };
+    const qtd = Number(data.quantidadeVendida) || 0;
+    if (qtd < 0 || qtd > Number(box.quantidadeCaixas) + EPS) return { ok: false, message: 'A quantidade vendida deve ficar entre zero e a quantidade de caixas montadas.' };
+    box.quantidadeVendida = qtd;
+    box.precoVendaUnitario = Number(data.precoVendaUnitario) || 0;
+    box.dataVenda = data.dataVenda || (qtd > 0 ? (box.dataVenda || box.data) : '');
+    saveDB();
+    return { ok: true };
+  }
+
+  function deleteMixedBox(id) {
+    db.settings.caixasMistas = getMixedBoxes().filter((b) => b.id !== id);
+    saveDB();
   }
 
   /* ======================================================================
@@ -1882,16 +2031,25 @@
           const cost = computeRecipeCost(r);
           custo += cost.custoUnitario * (Number(item.quantidade) || 0);
         });
+        const quantidadeCaixas = Number(document.getElementById('calcCaixaQuantidade') ? document.getElementById('calcCaixaQuantidade').value : 1) || 1;
+        const embalagem = Number(document.getElementById('calcCaixaEmbalagem') ? document.getElementById('calcCaixaEmbalagem').value : 0) || 0;
+        custo = (custo + embalagem) * quantidadeCaixas;
         const mult = Number(db.settings.multiplicador) || 3;
         document.getElementById('calcPreview').innerHTML = previewHTML(custo, custo * mult);
       };
       container.innerHTML = `
         <div id="caixaRows"></div>
         <button class="btn btn-sm" id="addCaixaRowBtn" type="button">${ICONS.plus} Adicionar sabor</button>
+        <div class="form-grid cols-3" style="margin-top:14px;">
+          <div class="field"><label>Quantidade de caixas</label><input type="number" min="1" step="1" id="calcCaixaQuantidade" value="1"></div>
+          <div class="field"><label>Embalagem por caixa</label><input type="number" min="0" step="any" id="calcCaixaEmbalagem" value="0"></div>
+        </div>
         <div class="recipe-cost-preview" id="calcPreview" style="margin-top:14px;"></div>
         <div class="form-actions"><button class="btn btn-primary" id="calcSalvarBtn">Salvar cálculo</button></div>
       `;
       renderCaixaRows();
+      document.getElementById('calcCaixaQuantidade').addEventListener('input', updateCaixaPreview);
+      document.getElementById('calcCaixaEmbalagem').addEventListener('input', updateCaixaPreview);
       document.getElementById('addCaixaRowBtn').addEventListener('click', () => {
         currentCaixaItems.push({ rowId: uid(), receitaId: db.recipes[0].id, quantidade: 1 });
         renderCaixaRows();
@@ -1907,11 +2065,14 @@
           custo += itemCusto;
           detalheItens.push({ receitaNome: r.nome, quantidade: item.quantidade });
         });
+        const quantidadeCaixas = Number(document.getElementById('calcCaixaQuantidade').value) || 1;
+        const embalagem = Number(document.getElementById('calcCaixaEmbalagem').value) || 0;
+        custo = (custo + embalagem) * quantidadeCaixas;
         const mult = Number(db.settings.multiplicador) || 3;
         addCalculation({
           tipo: 'caixa',
-          titulo: `Caixa mista (${detalheItens.map((i) => i.quantidade + 'x ' + i.receitaNome).join(', ')})`,
-          detalhes: { itens: detalheItens },
+          titulo: `${formatNumber(quantidadeCaixas, 0)} caixa(s) mista(s) (${detalheItens.map((i) => i.quantidade + 'x ' + i.receitaNome).join(', ')})`,
+          detalhes: { itens: detalheItens, quantidadeCaixas, embalagem },
           custoTotal: custo, valorVenda: custo * mult,
         });
         currentCaixaItems = [];
@@ -1970,6 +2131,14 @@
       custoVendasTotal += m.custoVendido;
       quantidadeVendidaTotal += Number(p.quantidadeVendida) || 0;
     });
+    getMixedBoxes()
+      .filter((b) => (Number(b.quantidadeVendida) || 0) > 0 && isDateInPeriod(b.dataVenda, currentProducaoPeriodo, producaoPeriodoCustomFrom, producaoPeriodoCustomTo))
+      .forEach((b) => {
+        const m = computeMixedBoxMetrics(b);
+        faturamentoTotal += m.faturamento;
+        custoVendasTotal += m.custoVendido;
+        quantidadeVendidaTotal += Number(b.quantidadeVendida) || 0;
+      });
     const lucroTotal = faturamentoTotal - custoVendasTotal;
     const margemTotal = faturamentoTotal > 0 ? (lucroTotal / faturamentoTotal) * 100 : 0;
 
@@ -2038,6 +2207,9 @@
         <div class="field span-2"><label>Observações</label><input type="text" id="pObs" placeholder="Opcional"></div>
       </div>
       <div class="form-actions"><button class="btn btn-primary" id="registrarProducaoBtn">${ICONS.factory} Registrar produção</button></div>
+      <div id="estoqueProntoResumo" style="margin-top:28px;"></div>
+      <div id="caixaMistaForm" style="margin-top:28px;"></div>
+      <div id="caixasMistasList" style="margin-top:28px;"></div>
     `;
     document.getElementById('pReceita').addEventListener('change', (e) => {
       const receita = getRecipe(e.target.value);
@@ -2058,6 +2230,98 @@
       renderProducaoForm(); // reseta o formulário para a próxima produção
       renderAll();
     });
+    renderReadyStockSummary();
+    renderMixedBoxForm();
+    renderMixedBoxesList();
+  }
+
+  function renderReadyStockSummary() {
+    const el = document.getElementById('estoqueProntoResumo');
+    if (!el) return;
+    const rows = db.recipes.map((r) => ({ recipe: r, qty: getReadyStockByRecipe(r.id) })).filter((x) => x.qty > EPS);
+    el.innerHTML = `
+      <h2 class="section-title">Estoque de brigadeiros prontos</h2>
+      ${rows.length ? `<div class="dash-grid">${rows.map((x) => `<div class="stat-card"><div class="stat-value">${formatNumber(x.qty, 0)}</div><div class="stat-label">${escapeHtml(x.recipe.nome)}</div></div>`).join('')}</div>` : `<p class="confirm-text">Nenhum brigadeiro disponível. Registre uma produção primeiro.</p>`}
+    `;
+  }
+
+  function renderMixedBoxForm() {
+    const el = document.getElementById('caixaMistaForm');
+    if (!el) return;
+    if (!db.recipes.length) { el.innerHTML = ''; return; }
+    if (!window.__mixedBoxDraft || !window.__mixedBoxDraft.length) window.__mixedBoxDraft = [{ rowId: uid(), receitaId: db.recipes[0].id, quantidadePorCaixa: 1 }];
+    const draft = window.__mixedBoxDraft;
+    el.innerHTML = `
+      <h2 class="section-title">Montar caixa mista</h2>
+      <div class="form-grid cols-3">
+        <div class="field"><label>Nome da caixa</label><input type="text" id="mbNome" placeholder="Ex.: Caixa 4 sabores"></div>
+        <div class="field"><label>Quantidade de caixas</label><input type="number" min="1" step="1" id="mbQuantidadeCaixas" value="1"></div>
+        <div class="field"><label>Custo da embalagem (cada)</label><input type="number" min="0" step="any" id="mbEmbalagem" value="0"></div>
+        <div class="field"><label>Preço de venda por caixa</label><input type="number" min="0" step="any" id="mbPreco" value="0"></div>
+        <div class="field"><label>Data</label><input type="date" id="mbData" value="${todayISO()}"></div>
+        <div class="field"><label>Observações</label><input type="text" id="mbObs" placeholder="Opcional"></div>
+      </div>
+      <div id="mbRows" style="margin-top:12px;">${draft.map((item) => `
+        <div class="caixa-item-row" data-row="${item.rowId}">
+          <div class="field"><label>Sabor</label><select data-role="mb-receita" data-row="${item.rowId}">${db.recipes.map((r) => `<option value="${r.id}" ${r.id === item.receitaId ? 'selected' : ''}>${escapeHtml(r.nome)} (${formatNumber(getReadyStockByRecipe(r.id), 0)} disponíveis)</option>`).join('')}</select></div>
+          <div class="field"><label>Unidades por caixa</label><input type="number" min="1" step="1" data-role="mb-qtd" data-row="${item.rowId}" value="${item.quantidadePorCaixa}"></div>
+          <button class="btn btn-sm btn-icon btn-danger" data-action="remover-linha-caixa-mista" data-row="${item.rowId}" type="button">${ICONS.trash}</button>
+        </div>`).join('')}</div>
+      <button class="btn btn-sm" id="mbAddRow" type="button">${ICONS.plus} Adicionar sabor</button>
+      <div class="form-actions"><button class="btn btn-primary" id="mbMontarBtn">Montar caixas</button></div>
+    `;
+    el.querySelectorAll('[data-role="mb-receita"]').forEach((inp) => inp.addEventListener('change', (e) => { draft.find((x) => x.rowId === e.target.dataset.row).receitaId = e.target.value; }));
+    el.querySelectorAll('[data-role="mb-qtd"]').forEach((inp) => inp.addEventListener('input', (e) => { draft.find((x) => x.rowId === e.target.dataset.row).quantidadePorCaixa = Number(e.target.value) || 0; }));
+    document.getElementById('mbAddRow').addEventListener('click', () => { draft.push({ rowId: uid(), receitaId: db.recipes[0].id, quantidadePorCaixa: 1 }); renderMixedBoxForm(); });
+    document.getElementById('mbMontarBtn').addEventListener('click', () => {
+      const result = registerMixedBox({
+        nome: document.getElementById('mbNome').value,
+        quantidadeCaixas: document.getElementById('mbQuantidadeCaixas').value,
+        custoEmbalagemUnitario: document.getElementById('mbEmbalagem').value,
+        precoVendaUnitario: document.getElementById('mbPreco').value,
+        data: document.getElementById('mbData').value,
+        observacoes: document.getElementById('mbObs').value,
+        itens: draft.map((x) => ({ receitaId: x.receitaId, quantidadePorCaixa: x.quantidadePorCaixa })),
+      });
+      if (!result.ok) { toast(result.message, 'danger'); return; }
+      window.__mixedBoxDraft = [];
+      renderAll();
+      toast('Caixas montadas e estoque pronto atualizado.', 'success');
+    });
+  }
+
+  function renderMixedBoxesList() {
+    const el = document.getElementById('caixasMistasList');
+    if (!el) return;
+    const boxes = [...getMixedBoxes()].sort((a, b) => b.criadoEm - a.criadoEm);
+    el.innerHTML = `<h2 class="section-title">Caixas montadas</h2>` + (boxes.length ? boxes.map((box) => {
+      const m = computeMixedBoxMetrics(box);
+      return `<div class="producao-item" data-box-id="${box.id}">
+        <div class="info"><strong>${escapeHtml(box.nome)} · ${formatNumber(box.quantidadeCaixas, 0)} caixa(s)</strong><div>${box.itens.map((i) => `${formatNumber(i.quantidadePorCaixa, 0)}x ${escapeHtml(i.receitaNome)}`).join(' · ')} · ${formatDateBR(box.data)}</div></div>
+        <div class="form-grid cols-3" style="margin:10px 0;">
+          <div class="field"><label>Caixas vendidas</label><input type="number" min="0" step="1" data-role="mb-vendida" value="${box.quantidadeVendida || ''}"></div>
+          <div class="field"><label>Preço por caixa</label><input type="number" min="0" step="any" data-role="mb-preco" value="${box.precoVendaUnitario || ''}"></div>
+          <div class="field"><label>Data da venda</label><input type="date" data-role="mb-data-venda" value="${box.dataVenda || box.data}"></div>
+        </div>
+        ${m.custoRegistrado ? `<div class="recipe-price-row"><span>Custo por caixa</span><b>${formatMoney(m.custoUnitario)}</b></div>` : `<div class="recipe-price-row"><span>Custo</span><b>Custo parcialmente não registrado</b></div>`}
+        <div class="recipe-price-row"><span>Faturamento</span><b>${formatMoney(m.faturamento)}</b></div>
+        <div class="recipe-price-row"><span>Lucro estimado</span><b>${formatMoney(m.lucro)}</b></div>
+        <div class="recipe-price-row"><span>Caixas restantes</span><b>${formatNumber(m.restante, 0)}</b></div>
+        <div class="venda-fields" style="margin-top:10px;"><button class="btn btn-sm btn-icon btn-danger" data-action="excluir-caixa-mista" data-id="${box.id}" title="Excluir">${ICONS.trash}</button></div>
+      </div>`;
+    }).join('') : `<p class="confirm-text">Nenhuma caixa montada ainda.</p>`);
+
+    el.querySelectorAll('.producao-item[data-box-id] input').forEach((inp) => inp.addEventListener('change', (e) => {
+      const row = e.target.closest('[data-box-id]');
+      const result = updateMixedBoxSales(row.dataset.boxId, {
+        quantidadeVendida: row.querySelector('[data-role="mb-vendida"]').value,
+        precoVendaUnitario: row.querySelector('[data-role="mb-preco"]').value,
+        dataVenda: row.querySelector('[data-role="mb-data-venda"]').value,
+      });
+      if (!result.ok) { toast(result.message, 'danger'); renderAll(); return; }
+      renderAll();
+      toast('Venda das caixas atualizada.', 'success');
+    }));
   }
 
   function renderProducaoLista() {
@@ -2262,8 +2526,16 @@
       custoVendasTotal += m.custoVendido;
       quantidadeVendidaTotal += Number(p.quantidadeVendida) || 0;
     });
+    const caixasComVenda = getMixedBoxes().filter((b) => (Number(b.quantidadeVendida) || 0) > 0 && isDateInPeriod(b.dataVenda, period, customFrom, customTo));
+    caixasComVenda.forEach((b) => {
+      const m = computeMixedBoxMetrics(b);
+      faturamentoTotal += m.faturamento;
+      custoVendasTotal += m.custoVendido;
+      quantidadeVendidaTotal += Number(b.quantidadeVendida) || 0;
+    });
     const lucroTotal = faturamentoTotal - custoVendasTotal;
-    const ticketMedio = producoesComVenda.length > 0 ? faturamentoTotal / producoesComVenda.length : 0;
+    const numeroVendas = producoesComVenda.length + caixasComVenda.length;
+    const ticketMedio = numeroVendas > 0 ? faturamentoTotal / numeroVendas : 0;
 
     const porReceita = {};
     producoesPorData.forEach((p) => { porReceita[p.receitaNome] = (porReceita[p.receitaNome] || 0) + (Number(p.quantidadeProduzida) || 0); });
@@ -2280,7 +2552,7 @@
     return {
       totalGastoCompras, faturamentoTotal, custoVendasTotal, lucroTotal, quantidadeVendidaTotal,
       quantidadeProduzidaTotal, numeroProducoes, ticketMedio, receitaMaisProduzida, ingredienteMaisGasto,
-      temDados: numeroProducoes > 0 || comprasNoPeriodo.length > 0,
+      temDados: numeroProducoes > 0 || comprasNoPeriodo.length > 0 || getMixedBoxes().length > 0,
       producoesListadas: [...producoesPorData].sort((a, b) => b.criadoEm - a.criadoEm),
     };
   }
@@ -2597,6 +2869,13 @@
         renderCalcForm();
         break;
       }
+      case 'remover-linha-caixa-mista': {
+        const rowId = el.dataset.row;
+        window.__mixedBoxDraft = (window.__mixedBoxDraft || []).filter((i) => i.rowId !== rowId);
+        if (!window.__mixedBoxDraft.length && db.recipes.length) window.__mixedBoxDraft = [{ rowId: uid(), receitaId: db.recipes[0].id, quantidadePorCaixa: 1 }];
+        renderMixedBoxForm();
+        break;
+      }
       case 'calc-tab':
         currentCalcTab = el.dataset.tipo;
         currentCaixaItems = [];
@@ -2638,7 +2917,20 @@
           message: 'Deseja realmente excluir este registro de produção? O estoque consumido será devolvido automaticamente aos mesmos lotes de origem.',
           confirmLabel: 'Excluir',
           danger: true,
-          onConfirm: () => { deleteProduction(id); renderAll(); toast('Produção excluída e estoque estornado.', 'success'); },
+          onConfirm: () => {
+            const result = deleteProduction(id);
+            if (!result.ok) { toast(result.message, 'danger'); return; }
+            renderAll(); toast('Produção excluída e estoque estornado.', 'success');
+          },
+        });
+        break;
+      case 'excluir-caixa-mista':
+        openConfirm({
+          title: 'Excluir caixa montada',
+          message: 'Ao excluir, os brigadeiros voltarão automaticamente para o estoque de produtos prontos.',
+          confirmLabel: 'Excluir',
+          danger: true,
+          onConfirm: () => { deleteMixedBox(id); renderAll(); toast('Caixa excluída e brigadeiros devolvidos ao estoque pronto.', 'success'); },
         });
         break;
       default:
