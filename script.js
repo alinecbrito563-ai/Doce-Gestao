@@ -1067,7 +1067,7 @@
     configuracoes: ['Configurações', 'Preferências e backup dos seus dados'],
   };
 
-  let currentView = 'dashboard';
+  let currentView = localStorage.getItem('doceGestaoUltimaTela') || 'dashboard';
   let currentCalcTab = 'receita';
   let currentCaixaItems = [];
   let currentProducaoPeriodo = 'mes';
@@ -1079,6 +1079,7 @@
 
   function goToView(view) {
     currentView = view;
+    localStorage.setItem('doceGestaoUltimaTela', view);
     document.querySelectorAll('.view').forEach((v) => v.classList.remove('active'));
     document.getElementById('view-' + view).classList.add('active');
     document.querySelectorAll('.nav-item[data-view]').forEach((btn) => {
@@ -1407,14 +1408,26 @@
         <div class="modal-sub-list" id="purchaseListArea"></div>
       `,
       onMount: () => {
+        const quantidadeInput = document.getElementById('pQuantidade');
+        const valorTotalInput = document.getElementById('pValorTotal');
+        const valorUnitarioInput = document.getElementById('pValorUnitario');
+
         const recalc = () => {
-          const q = Number(document.getElementById('pQuantidade').value) || 0;
-          const v = Number(document.getElementById('pValorTotal').value) || 0;
-          document.getElementById('pValorUnitario').value = q > 0 ? formatMoney(v / q) : '—';
+          const quantidade = quantidadeInput.valueAsNumber;
+          const valorTotal = valorTotalInput.valueAsNumber;
+
+          if (Number.isFinite(quantidade) && quantidade > 0 && Number.isFinite(valorTotal)) {
+            valorUnitarioInput.value = formatMoney(valorTotal / quantidade);
+          } else {
+            valorUnitarioInput.value = '—';
+          }
         };
-        document.getElementById('pQuantidade').addEventListener('input', recalc);
-        document.getElementById('pValorTotal').addEventListener('input', recalc);
-        recalc();
+
+        quantidadeInput.addEventListener('input', recalc);
+        quantidadeInput.addEventListener('change', recalc);
+        valorTotalInput.addEventListener('input', recalc);
+        valorTotalInput.addEventListener('change', recalc);
+        setTimeout(recalc, 0);
         renderList();
         document.getElementById('savePurchaseBtn').addEventListener('click', () => {
           const data = {
@@ -2630,7 +2643,8 @@
     }
     migrateProductions();
     hideAuthGate();
-    goToView('dashboard');
+    const ultimaTela = localStorage.getItem('doceGestaoUltimaTela') || 'dashboard';
+    goToView(VIEW_TITLES[ultimaTela] ? ultimaTela : 'dashboard');
   }
 
   if (!SUPABASE_CONFIGURADO) {
