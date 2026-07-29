@@ -2024,23 +2024,75 @@
         updateCaixaPreview();
       };
       const readCaixaCalculation = () => {
-        let custoBrigadeirosPorCaixa = 0;
-        const itens = [];
+        const quantidadeCaixas = Math.max(1, Number(document.getElementById('calcCaixaQuantidade')?.value) || 1);
+        const embalagemPorCaixa = Math.max(0, Number(document.getElementById('calcCaixaEmbalagem')?.value) || 0);
+
+        const linhas = [];
         document.querySelectorAll('#caixaRows .caixa-item-row').forEach((row) => {
           const receitaId = row.querySelector('[data-role="caixa-receita"]')?.value;
           const quantidade = Number(row.querySelector('[data-role="caixa-qtd"]')?.value) || 0;
-          const r = getRecipe(receitaId);
-          if (!r || quantidade <= 0) return;
-          const cost = computeRecipeCost(r);
-          const subtotal = cost.custoUnitario * quantidade;
-          custoBrigadeirosPorCaixa += subtotal;
-          itens.push({ receitaId: r.id, receitaNome: r.nome, quantidade, custoUnitario: cost.custoUnitario, subtotal });
+          const receita = getRecipe(receitaId);
+          if (!receita || quantidade <= 0) return;
+          linhas.push({ receitaId: receita.id, receitaNome: receita.nome, quantidade });
         });
-        const quantidadeCaixas = Math.max(1, Number(document.getElementById('calcCaixaQuantidade')?.value) || 1);
-        const embalagemPorCaixa = Math.max(0, Number(document.getElementById('calcCaixaEmbalagem')?.value) || 0);
+
+        // Agrupa sabores repetidos para não usar o mesmo estoque pronto duas vezes
+        // no planejamento FIFO do cálculo.
+        const agrupados = {};
+        linhas.forEach((linha) => {
+          if (!agrupados[linha.receitaId]) {
+            agrupados[linha.receitaId] = { receitaId: linha.receitaId, receitaNome: linha.receitaNome, quantidadePorCaixa: 0 };
+          }
+          agrupados[linha.receitaId].quantidadePorCaixa += linha.quantidade;
+        });
+
+        let custoBrigadeirosTotal = 0;
+        let possuiCustoEstimado = false;
+        let possuiCustoSemRegistro = false;
+        const itens = Object.values(agrupados).map((item) => {
+          const receita = getRecipe(item.receitaId);
+          const quantidadeTotal = item.quantidadePorCaixa * quantidadeCaixas;
+          const plano = planReadyProductConsumption(item.receitaId, quantidadeTotal);
+          const quantidadeReal = plano.allocations.reduce((s, a) => s + (Number(a.quantidade) || 0), 0);
+          const custoReal = plano.allocations.reduce((s, a) => s + ((Number(a.quantidade) || 0) * (Number(a.custoUnitario) || 0)), 0);
+          const temLoteSemCusto = plano.allocations.some((a) => a.custoNaoRegistrado);
+          const faltante = Math.max(0, quantidadeTotal - quantidadeReal);
+          const custoPadraoUnitario = computeRecipeCost(receita).custoUnitario;
+          const custoEstimadoFaltante = faltante * custoPadraoUnitario;
+          const custoTotalItem = custoReal + custoEstimadoFaltante;
+          const custoUnitarioMedio = quantidadeTotal > 0 ? custoTotalItem / quantidadeTotal : 0;
+
+          if (faltante > EPS) possuiCustoEstimado = true;
+          if (temLoteSemCusto) possuiCustoSemRegistro = true;
+          custoBrigadeirosTotal += custoTotalItem;
+
+          return {
+            receitaId: item.receitaId,
+            receitaNome: item.receitaNome,
+            quantidade: item.quantidadePorCaixa,
+            quantidadeTotal,
+            custoUnitario: custoUnitarioMedio,
+            subtotal: custoTotalItem / quantidadeCaixas,
+            quantidadeReal,
+            faltante,
+            custoReal,
+            custoEstimadoFaltante,
+          };
+        });
+
+        const custoBrigadeirosPorCaixa = custoBrigadeirosTotal / quantidadeCaixas;
         const custoPorCaixa = custoBrigadeirosPorCaixa + embalagemPorCaixa;
-        const custoTotal = custoPorCaixa * quantidadeCaixas;
-        return { itens, quantidadeCaixas, embalagemPorCaixa, custoBrigadeirosPorCaixa, custoPorCaixa, custoTotal };
+        const custoTotal = custoBrigadeirosTotal + embalagemPorCaixa * quantidadeCaixas;
+        return {
+          itens,
+          quantidadeCaixas,
+          embalagemPorCaixa,
+          custoBrigadeirosPorCaixa,
+          custoPorCaixa,
+          custoTotal,
+          possuiCustoEstimado,
+          possuiCustoSemRegistro,
+        };
       };
       const updateCaixaPreview = () => {
         const calc = readCaixaCalculation();
@@ -2048,8 +2100,13 @@
         const detalhes = calc.itens.map((item) => `
           <div class="item"><span>${formatNumber(item.quantidade, 0)}x ${escapeHtml(item.receitaNome)} (${formatMoney(item.custoUnitario)} cada)</span><b>${formatMoney(item.subtotal)}</b></div>
         `).join('');
+        const avisos = [
+          calc.possuiCustoEstimado ? '<div class="item"><span>⚠️ Parte do cálculo usa o rendimento padrão porque não há brigadeiros prontos suficientes.</span><b>Estimativa</b></div>' : '',
+          calc.possuiCustoSemRegistro ? '<div class="item"><span>⚠️ Existe produção antiga sem custo real registrado.</span><b>Verificar</b></div>' : '',
+        ].join('');
         document.getElementById('calcPreview').innerHTML = `
           ${detalhes}
+          ${avisos}
           <div class="item"><span>Brigadeiros por caixa</span><b>${formatMoney(calc.custoBrigadeirosPorCaixa)}</b></div>
           <div class="item"><span>Embalagem por caixa</span><b>${formatMoney(calc.embalagemPorCaixa)}</b></div>
           <div class="item"><span>Custo por caixa</span><b>${formatMoney(calc.custoPorCaixa)}</b></div>
@@ -2085,7 +2142,7 @@
         addCalculation({
           tipo: 'caixa',
           titulo: `${formatNumber(calc.quantidadeCaixas, 0)} caixa(s) mista(s) (${detalheItens.map((i) => i.quantidade + 'x ' + i.receitaNome).join(', ')})`,
-          detalhes: { itens: detalheItens, quantidadeCaixas: calc.quantidadeCaixas, embalagem: calc.embalagemPorCaixa, custoPorCaixa: calc.custoPorCaixa },
+          detalhes: { itens: detalheItens, quantidadeCaixas: calc.quantidadeCaixas, embalagem: calc.embalagemPorCaixa, custoPorCaixa: calc.custoPorCaixa, usaCustoEstimado: calc.possuiCustoEstimado, possuiCustoSemRegistro: calc.possuiCustoSemRegistro },
           custoTotal: calc.custoTotal, valorVenda: calc.custoTotal * mult,
         });
         currentCaixaItems = [];
