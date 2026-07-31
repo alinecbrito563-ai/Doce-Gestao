@@ -70,7 +70,7 @@
       productions: [],
       movements: [],
       calculations: [],
-      settings: { multiplicador: 3, caixasMistas: [] },
+      settings: { multiplicador: 3, caixasMistas: [], materiais: [], comprasMateriais: [], movimentosMateriais: [] },
     };
   }
 
@@ -114,7 +114,7 @@
     tabelaResults.forEach((r) => { if (r.error) throw r.error; });
     const settingsRes = await sb.from('user_settings').select('payload').eq('user_id', userId).maybeSingle();
     if (settingsRes.error) throw settingsRes.error;
-    const loaded = { settings: (settingsRes.data && settingsRes.data.payload) ? settingsRes.data.payload : { multiplicador: 3, caixasMistas: [] } };
+    const loaded = { settings: (settingsRes.data && settingsRes.data.payload) ? settingsRes.data.payload : { multiplicador: 3, caixasMistas: [], materiais: [], comprasMateriais: [], movimentosMateriais: [] } };
     TABELAS.forEach((t, i) => { loaded[t] = (tabelaResults[i].data || []).map((r) => r.payload); });
     return Object.assign(defaultDB(), loaded);
   }
@@ -753,8 +753,11 @@
   //     nunca um número inventado.
   function migrateProductions() {
     let changed = false;
-    if (!db.settings) { db.settings = { multiplicador: 3, caixasMistas: [] }; changed = true; }
+    if (!db.settings) { db.settings = { multiplicador: 3, caixasMistas: [], materiais: [], comprasMateriais: [], movimentosMateriais: [] }; changed = true; }
     if (!Array.isArray(db.settings.caixasMistas)) { db.settings.caixasMistas = []; changed = true; }
+    if (!Array.isArray(db.settings.materiais)) { db.settings.materiais = []; changed = true; }
+    if (!Array.isArray(db.settings.comprasMateriais)) { db.settings.comprasMateriais = []; changed = true; }
+    if (!Array.isArray(db.settings.movimentosMateriais)) { db.settings.movimentosMateriais = []; changed = true; }
     db.productions.forEach((p) => {
       if (typeof p.quantidadeReceitas !== 'number') {
         const receita = getRecipe(p.receitaId);
@@ -1163,6 +1166,128 @@
     return { ok: true, box };
   }
 
+
+  function updateMixedBox(id, data) {
+    const box = getMixedBoxes().find((b) => b.id === id);
+    if (!box) return { ok: false, message: 'Caixa não encontrada.' };
+
+    const quantidadeCaixas = Number(data.quantidadeCaixas) || 0;
+    if (quantidadeCaixas <= 0) return { ok: false, message: 'Informe quantas caixas foram montadas.' };
+    if (quantidadeCaixas + EPS < (Number(box.quantidadeVendida) || 0)) {
+      return { ok: false, message: `Não é possível reduzir para menos de ${formatNumber(box.quantidadeVendida, 0)} caixa(s), pois essa quantidade já foi vendida.` };
+    }
+
+    const itens = (data.itens || []).filter((i) => i.receitaId && Number(i.quantidadePorCaixa) > 0);
+    if (!itens.length) return { ok: false, message: 'Adicione pelo menos um sabor à caixa.' };
+
+    const aggregated = {};
+    itens.forEach((i) => { aggregated[i.receitaId] = (aggregated[i.receitaId] || 0) + Number(i.quantidadePorCaixa); });
+
+    const allAllocations = [];
+    const normalizedItems = [];
+    for (const recipeId of Object.keys(aggregated)) {
+      const recipe = getRecipe(recipeId);
+      if (!recipe) return { ok: false, message: 'Uma das receitas selecionadas não existe mais.' };
+      const perBox = aggregated[recipeId];
+      const totalNeeded = perBox * quantidadeCaixas;
+      const plan = planReadyProductConsumption(recipeId, totalNeeded, id);
+      if (!plan.ok) {
+        return { ok: false, message: `Não há ${recipe.nome} suficiente no estoque pronto. Faltam ${formatNumber(plan.faltante, 0)} unidade(s).` };
+      }
+      normalizedItems.push({ receitaId: recipeId, receitaNome: recipe.nome, quantidadePorCaixa: perBox, quantidadeTotal: totalNeeded });
+      allAllocations.push(...plan.allocations);
+    }
+
+    const custoBrigadeiros = allAllocations.reduce((total, a) => total + a.quantidade * a.custoUnitario, 0);
+    const custoEmbalagemUnitario = Number(data.custoEmbalagemUnitario) || 0;
+
+    box.nome = (data.nome || '').trim() || 'Caixa mista';
+    box.itens = normalizedItems;
+    box.alocacoes = allAllocations;
+    box.quantidadeCaixas = quantidadeCaixas;
+    box.precoVendaUnitario = Number(data.precoVendaUnitario) || 0;
+    box.custoEmbalagemUnitario = custoEmbalagemUnitario;
+    box.custoTotal = custoBrigadeiros + custoEmbalagemUnitario * quantidadeCaixas;
+    box.custoNaoRegistrado = allAllocations.some((a) => a.custoNaoRegistrado);
+    box.data = data.data || box.data;
+    box.observacoes = data.observacoes || '';
+    saveDB();
+    return { ok: true, box };
+  }
+
+  function openEditMixedBoxModal(id) {
+    const box = getMixedBoxes().find((b) => b.id === id);
+    if (!box) return;
+    const draft = (box.itens || []).map((i) => ({ rowId: uid(), receitaId: i.receitaId, quantidadePorCaixa: i.quantidadePorCaixa }));
+
+    const renderRows = () => {
+      const rowsEl = document.getElementById('editMbRows');
+      if (!rowsEl) return;
+      rowsEl.innerHTML = draft.map((item) => `
+        <div class="caixa-item-row" data-row="${item.rowId}">
+          <div class="field"><label>Sabor</label><select data-role="edit-mb-receita" data-row="${item.rowId}">
+            ${db.recipes.map((r) => `<option value="${r.id}" ${r.id === item.receitaId ? 'selected' : ''}>${escapeHtml(r.nome)} (${formatNumber(getReadyStockByRecipe(r.id, box.id), 0)} disponíveis considerando esta caixa)</option>`).join('')}
+          </select></div>
+          <div class="field"><label>Unidades por caixa</label><input type="number" min="1" step="1" data-role="edit-mb-qtd" data-row="${item.rowId}" value="${item.quantidadePorCaixa}"></div>
+          <button class="btn btn-sm btn-icon btn-danger" type="button" data-role="edit-mb-remove" data-row="${item.rowId}">${ICONS.trash}</button>
+        </div>`).join('');
+
+      rowsEl.querySelectorAll('[data-role="edit-mb-receita"]').forEach((input) => input.addEventListener('change', (e) => {
+        const item = draft.find((x) => x.rowId === e.target.dataset.row);
+        if (item) item.receitaId = e.target.value;
+      }));
+      rowsEl.querySelectorAll('[data-role="edit-mb-qtd"]').forEach((input) => input.addEventListener('input', (e) => {
+        const item = draft.find((x) => x.rowId === e.target.dataset.row);
+        if (item) item.quantidadePorCaixa = Number(e.target.value) || 0;
+      }));
+      rowsEl.querySelectorAll('[data-role="edit-mb-remove"]').forEach((button) => button.addEventListener('click', () => {
+        if (draft.length <= 1) { toast('A caixa precisa ter pelo menos um sabor.', 'warning'); return; }
+        const index = draft.findIndex((x) => x.rowId === button.dataset.row);
+        if (index >= 0) draft.splice(index, 1);
+        renderRows();
+      }));
+    };
+
+    openModal({
+      title: 'Editar caixa montada',
+      wide: true,
+      bodyHTML: `
+        <div class="form-grid cols-3">
+          <div class="field"><label>Nome da caixa</label><input id="editMbNome" value="${escapeHtml(box.nome)}"></div>
+          <div class="field"><label>Quantidade de caixas</label><input type="number" min="${Number(box.quantidadeVendida) || 1}" step="1" id="editMbQuantidade" value="${box.quantidadeCaixas}"></div>
+          <div class="field"><label>Custo da embalagem (cada)</label><input type="number" min="0" step="any" id="editMbEmbalagem" value="${box.custoEmbalagemUnitario || 0}"></div>
+          <div class="field"><label>Preço de venda por caixa</label><input type="number" min="0" step="any" id="editMbPreco" value="${box.precoVendaUnitario || 0}"></div>
+          <div class="field"><label>Data</label><input type="date" id="editMbData" value="${box.data}"></div>
+          <div class="field"><label>Observações</label><input id="editMbObs" value="${escapeHtml(box.observacoes || '')}"></div>
+        </div>
+        <div id="editMbRows" style="margin-top:12px;"></div>
+        <button class="btn btn-sm" type="button" id="editMbAdd">${ICONS.plus} Adicionar sabor</button>`,
+      footerHTML: `<button class="btn btn-ghost" data-action="fechar-modal">Cancelar</button><button class="btn btn-primary" id="salvarEdicaoCaixaBtn">${ICONS.check} Salvar alterações</button>`,
+      onMount: () => {
+        renderRows();
+        document.getElementById('editMbAdd').addEventListener('click', () => {
+          draft.push({ rowId: uid(), receitaId: db.recipes[0].id, quantidadePorCaixa: 1 });
+          renderRows();
+        });
+        document.getElementById('salvarEdicaoCaixaBtn').addEventListener('click', () => {
+          const result = updateMixedBox(id, {
+            nome: document.getElementById('editMbNome').value,
+            quantidadeCaixas: document.getElementById('editMbQuantidade').value,
+            custoEmbalagemUnitario: document.getElementById('editMbEmbalagem').value,
+            precoVendaUnitario: document.getElementById('editMbPreco').value,
+            data: document.getElementById('editMbData').value,
+            observacoes: document.getElementById('editMbObs').value,
+            itens: draft.map((x) => ({ receitaId: x.receitaId, quantidadePorCaixa: x.quantidadePorCaixa })),
+          });
+          if (!result.ok) { toast(result.message, 'danger'); return; }
+          closeModal();
+          renderAll();
+          toast('Caixa atualizada e estoque pronto recalculado.', 'success');
+        });
+      },
+    });
+  }
+
   function computeMixedBoxMetrics(box) {
     const quantidade = Number(box.quantidadeCaixas) || 0;
     const vendida = Number(box.quantidadeVendida) || 0;
@@ -1191,6 +1316,115 @@
   function deleteMixedBox(id) {
     db.settings.caixasMistas = getMixedBoxes().filter((b) => b.id !== id);
     saveDB();
+  }
+
+
+  /* ======================================================================
+     9.2 MATERIAIS E EMBALAGENS (ESTOQUE MANUAL + FINANCEIRO)
+     ====================================================================== */
+
+  function ensureMaterialData() {
+    if (!db.settings) db.settings = {};
+    if (!Array.isArray(db.settings.materiais)) db.settings.materiais = [];
+    if (!Array.isArray(db.settings.comprasMateriais)) db.settings.comprasMateriais = [];
+    if (!Array.isArray(db.settings.movimentosMateriais)) db.settings.movimentosMateriais = [];
+  }
+
+  function getMaterials() { ensureMaterialData(); return db.settings.materiais; }
+  function getMaterialPurchases() { ensureMaterialData(); return db.settings.comprasMateriais; }
+  function getMaterialMovements() { ensureMaterialData(); return db.settings.movimentosMateriais; }
+  function getMaterial(id) { return getMaterials().find((m) => m.id === id); }
+
+  function getMaterialStock(id) {
+    const entradas = getMaterialPurchases().filter((p) => p.materialId === id).reduce((s, p) => s + (Number(p.quantidade) || 0), 0);
+    const saidas = getMaterialMovements().filter((m) => m.materialId === id).reduce((s, m) => s + (Number(m.quantidade) || 0), 0);
+    return entradas - saidas;
+  }
+
+  function addMaterial(data) {
+    const material = { id: uid(), nome: data.nome.trim(), unidade: data.unidade || 'un', estoqueMinimo: Number(data.estoqueMinimo) || 0, observacao: data.observacao || '', criadoEm: Date.now() };
+    getMaterials().push(material); saveDB(); return material;
+  }
+
+  function addMaterialPurchase(materialId, data) {
+    const quantidade = Number(data.quantidade) || 0;
+    const valorTotal = Number(data.valorTotal) || 0;
+    if (quantidade <= 0) return { ok: false, message: 'Informe uma quantidade válida.' };
+    getMaterialPurchases().push({ id: uid(), materialId, quantidade, valorTotal, custoUnitario: valorTotal / quantidade, dataCompra: data.dataCompra || todayISO(), observacao: data.observacao || '', criadoEm: Date.now() });
+    saveDB(); return { ok: true };
+  }
+
+  function addMaterialUse(materialId, data) {
+    const quantidade = Number(data.quantidade) || 0;
+    if (quantidade <= 0) return { ok: false, message: 'Informe uma quantidade válida.' };
+    const saldo = getMaterialStock(materialId);
+    if (quantidade > saldo + EPS) return { ok: false, message: `Estoque insuficiente. Disponível: ${formatNumber(saldo, 0)}.` };
+    getMaterialMovements().push({ id: uid(), materialId, quantidade, data: data.data || todayISO(), observacao: data.observacao || '', criadoEm: Date.now() });
+    saveDB(); return { ok: true };
+  }
+
+  function deleteMaterial(id) {
+    db.settings.materiais = getMaterials().filter((m) => m.id !== id);
+    db.settings.comprasMateriais = getMaterialPurchases().filter((p) => p.materialId !== id);
+    db.settings.movimentosMateriais = getMaterialMovements().filter((m) => m.materialId !== id);
+    saveDB();
+  }
+
+  function openMaterialModal() {
+    openModal({
+      title: 'Novo material ou embalagem',
+      bodyHTML: `<div class="form-grid">
+        <div class="field span-2"><label>Nome</label><input id="matNome" placeholder="Ex.: Forminha nº 5"></div>
+        <div class="field"><label>Unidade</label><input id="matUnidade" value="un" placeholder="un, caixa, rolo..."></div>
+        <div class="field"><label>Estoque mínimo</label><input type="number" min="0" step="any" id="matMinimo" value="0"></div>
+        <div class="field span-2"><label>Observação</label><input id="matObs" placeholder="Opcional"></div>
+      </div>`,
+      footerHTML: `<button class="btn btn-ghost" data-action="fechar-modal">Cancelar</button><button class="btn btn-primary" id="salvarMaterialBtn">Salvar</button>`,
+      onMount: () => document.getElementById('salvarMaterialBtn').addEventListener('click', () => {
+        const nome = document.getElementById('matNome').value.trim();
+        if (!nome) { toast('Informe o nome do material.', 'danger'); return; }
+        addMaterial({ nome, unidade: document.getElementById('matUnidade').value, estoqueMinimo: document.getElementById('matMinimo').value, observacao: document.getElementById('matObs').value });
+        closeModal(); renderAll(); toast('Material cadastrado.', 'success');
+      }),
+    });
+  }
+
+  function openMaterialPurchaseModal(id) {
+    const material = getMaterial(id); if (!material) return;
+    openModal({
+      title: `Comprar — ${material.nome}`,
+      bodyHTML: `<div class="form-grid">
+        <div class="field"><label>Quantidade comprada</label><input type="number" min="0.01" step="any" id="matCompraQtd"></div>
+        <div class="field"><label>Valor total pago</label><input type="number" min="0" step="any" id="matCompraValor"></div>
+        <div class="field"><label>Data da compra</label><input type="date" id="matCompraData" value="${todayISO()}"></div>
+        <div class="field"><label>Observação</label><input id="matCompraObs" placeholder="Loja, pedido..."></div>
+      </div>`,
+      footerHTML: `<button class="btn btn-ghost" data-action="fechar-modal">Cancelar</button><button class="btn btn-primary" id="salvarCompraMaterialBtn">Registrar compra</button>`,
+      onMount: () => document.getElementById('salvarCompraMaterialBtn').addEventListener('click', () => {
+        const result = addMaterialPurchase(id, { quantidade: document.getElementById('matCompraQtd').value, valorTotal: document.getElementById('matCompraValor').value, dataCompra: document.getElementById('matCompraData').value, observacao: document.getElementById('matCompraObs').value });
+        if (!result.ok) { toast(result.message, 'danger'); return; }
+        closeModal(); renderAll(); toast('Compra registrada no estoque e no financeiro.', 'success');
+      }),
+    });
+  }
+
+  function openMaterialUseModal(id) {
+    const material = getMaterial(id); if (!material) return;
+    openModal({
+      title: `Registrar uso — ${material.nome}`,
+      bodyHTML: `<p class="confirm-text">Saldo atual: <strong>${formatNumber(getMaterialStock(id), 0)} ${escapeHtml(material.unidade)}</strong></p>
+      <div class="form-grid">
+        <div class="field"><label>Quantidade usada</label><input type="number" min="0.01" step="any" id="matUsoQtd"></div>
+        <div class="field"><label>Data</label><input type="date" id="matUsoData" value="${todayISO()}"></div>
+        <div class="field span-2"><label>Observação</label><input id="matUsoObs" placeholder="Ex.: Pedido da igreja"></div>
+      </div>`,
+      footerHTML: `<button class="btn btn-ghost" data-action="fechar-modal">Cancelar</button><button class="btn btn-primary" id="salvarUsoMaterialBtn">Dar baixa</button>`,
+      onMount: () => document.getElementById('salvarUsoMaterialBtn').addEventListener('click', () => {
+        const result = addMaterialUse(id, { quantidade: document.getElementById('matUsoQtd').value, data: document.getElementById('matUsoData').value, observacao: document.getElementById('matUsoObs').value });
+        if (!result.ok) { toast(result.message, 'danger'); return; }
+        closeModal(); renderAll(); toast('Baixa registrada.', 'success');
+      }),
+    });
   }
 
   /* ======================================================================
@@ -1289,6 +1523,7 @@
     renderEstoque();
     renderReceitas();
     renderProducaoResumo();
+    renderProducaoForm();
     renderProducaoLista();
     renderMovimentacoes();
     renderCalcHistory();
@@ -1393,46 +1628,61 @@
      ====================================================================== */
 
   function renderEstoque() {
+    ensureMaterialData();
     const grid = document.getElementById('estoqueGrid');
     const term = (document.getElementById('estoqueSearch').value || '').toLowerCase().trim();
-    const list = db.ingredients
-      .filter((i) => i.nome.toLowerCase().includes(term))
-      .sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+    const list = db.ingredients.filter((i) => i.nome.toLowerCase().includes(term)).sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+    const materiais = getMaterials().filter((m) => m.nome.toLowerCase().includes(term)).sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
 
-    if (!list.length) {
-      grid.innerHTML = `<div class="empty-state">${ICONS.box2}<strong>Nenhum ingrediente encontrado</strong>Cadastre seu primeiro ingrediente para começar a controlar o estoque.</div>`;
-      return;
-    }
+    const materiaisHTML = `
+      <div style="grid-column:1/-1;">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px;">
+          <h2 class="section-title" style="margin:0;">Materiais e embalagens</h2>
+          <button class="btn btn-primary btn-sm" data-action="novo-material">${ICONS.plus} Novo material</button>
+        </div>
+        ${materiais.length ? `<div class="estoque-grid">${materiais.map((m) => {
+          const saldo = getMaterialStock(m.id);
+          const baixo = saldo <= (Number(m.estoqueMinimo) || 0);
+          const compras = getMaterialPurchases().filter((p) => p.materialId === m.id);
+          const gasto = compras.reduce((t, p) => t + (Number(p.valorTotal) || 0), 0);
+          return `<div class="ing-card">
+            <div class="ing-card-top"><h3>${escapeHtml(m.nome)}</h3><span class="tag-badge tag-${baixo ? 'warn' : 'ok'}">${baixo ? 'Estoque baixo' : 'Estoque ok'}</span></div>
+            <div class="ing-qty"><b>${formatNumber(saldo, saldo % 1 === 0 ? 0 : 2)} ${escapeHtml(m.unidade)}</b> em estoque</div>
+            <div class="ing-meta"><span>Mínimo: ${formatNumber(m.estoqueMinimo, 0)}</span><span>Total comprado: ${formatMoney(gasto)}</span></div>
+            ${m.observacao ? `<p class="confirm-text">${escapeHtml(m.observacao)}</p>` : ''}
+            <div class="ing-actions">
+              <button class="btn btn-sm" data-action="comprar-material" data-id="${m.id}">${ICONS.cart} Comprar</button>
+              <button class="btn btn-sm" data-action="usar-material" data-id="${m.id}">${ICONS.move} Dar baixa</button>
+              <button class="btn btn-sm btn-danger" data-action="excluir-material" data-id="${m.id}">${ICONS.trash}</button>
+            </div>
+          </div>`;
+        }).join('')}</div>` : `<p class="confirm-text">Nenhum material ou embalagem cadastrado.</p>`}
+        <h2 class="section-title" style="margin-top:28px;">Ingredientes</h2>
+      </div>`;
 
-    grid.innerHTML = list.map((ing) => {
+    const ingredientesHTML = list.length ? list.map((ing) => {
       const stockBase = getStockBase(ing.id);
       const minBase = toBase(ing.estoqueMinimo || 0, ing.unidade);
       const status = getStockStatus(ing);
       const pct = minBase > 0 ? Math.min(100, Math.max(4, (stockBase / (minBase * 2)) * 100)) : (stockBase > 0 ? 100 : 0);
       const nextV = getNextValidade(ing.id);
       const vStatus = nextV ? getValidadeStatus(nextV) : null;
-      return `
-        <div class="ing-card" data-ingredient-id="${ing.id}">
-          <div class="ing-card-top">
-            <h3>${escapeHtml(ing.nome)}</h3>
-            <span class="tag-badge tag-${status.level}">${status.label}</span>
-          </div>
-          <div class="ing-qty"><b>${formatQuantityBase(stockBase, ing.unidade)}</b> em estoque</div>
-          <div class="bar-track"><div class="bar-fill ${status.level === 'danger' ? 'empty' : status.level === 'warn' ? 'low' : ''}" style="width:${pct}%"></div></div>
-          <div class="ing-meta">
-            <span>Mínimo: ${formatQuantityBase(minBase, ing.unidade)}</span>
-            <span>${nextV ? `Validade: ${formatDateBR(nextV)}` : 'Sem lote com validade'}</span>
-          </div>
-          ${vStatus && vStatus.level !== 'ok' ? `<span class="tag-badge tag-${vStatus.level}">${vStatus.label}</span>` : ''}
-          <div class="ing-actions">
-            <button class="btn btn-sm" data-action="editar-ingrediente" data-id="${ing.id}">${ICONS.edit} Editar</button>
-            <button class="btn btn-sm" data-action="comprar-ingrediente" data-id="${ing.id}">${ICONS.cart} Comprar</button>
-            <button class="btn btn-sm" data-action="movimentar-ingrediente" data-id="${ing.id}">${ICONS.move} Movimentar</button>
-            <button class="btn btn-sm btn-danger" data-action="excluir-ingrediente" data-id="${ing.id}">${ICONS.trash}</button>
-          </div>
+      return `<div class="ing-card" data-ingredient-id="${ing.id}">
+        <div class="ing-card-top"><h3>${escapeHtml(ing.nome)}</h3><span class="tag-badge tag-${status.level}">${status.label}</span></div>
+        <div class="ing-qty"><b>${formatQuantityBase(stockBase, ing.unidade)}</b> em estoque</div>
+        <div class="bar-track"><div class="bar-fill ${status.level === 'danger' ? 'empty' : status.level === 'warn' ? 'low' : ''}" style="width:${pct}%"></div></div>
+        <div class="ing-meta"><span>Mínimo: ${formatQuantityBase(minBase, ing.unidade)}</span><span>${nextV ? `Validade: ${formatDateBR(nextV)}` : 'Sem lote com validade'}</span></div>
+        ${vStatus && vStatus.level !== 'ok' ? `<span class="tag-badge tag-${vStatus.level}">${vStatus.label}</span>` : ''}
+        <div class="ing-actions">
+          <button class="btn btn-sm" data-action="editar-ingrediente" data-id="${ing.id}">${ICONS.edit} Editar</button>
+          <button class="btn btn-sm" data-action="comprar-ingrediente" data-id="${ing.id}">${ICONS.cart} Comprar</button>
+          <button class="btn btn-sm" data-action="movimentar-ingrediente" data-id="${ing.id}">${ICONS.move} Movimentar</button>
+          <button class="btn btn-sm btn-danger" data-action="excluir-ingrediente" data-id="${ing.id}">${ICONS.trash}</button>
         </div>
-      `;
-    }).join('');
+      </div>`;
+    }).join('') : `<div class="empty-state">${ICONS.box2}<strong>Nenhum ingrediente encontrado</strong>Cadastre seu primeiro ingrediente para começar a controlar o estoque.</div>`;
+
+    grid.innerHTML = materiaisHTML + ingredientesHTML;
   }
 
   function openIngredientModal(id) {
@@ -2296,8 +2546,9 @@
       const observacoes = document.getElementById('pObs').value;
       if (!quantidadeReceitas || Number(quantidadeReceitas) <= 0) { toast('Informe quantas receitas foram feitas.', 'danger'); return; }
       if (!quantidadeProduzida || Number(quantidadeProduzida) <= 0) { toast('Informe o rendimento real.', 'danger'); return; }
-      registerProduction({ receitaId, quantidadeReceitas, quantidadeProduzida, pesoUnitario, data, observacoes });
-      renderProducaoForm(); // reseta o formulário para a próxima produção
+      const production = registerProduction({ receitaId, quantidadeReceitas, quantidadeProduzida, pesoUnitario, data, observacoes });
+      if (!production) return;
+      window.__mixedBoxDraft = [];
       renderAll();
     });
     renderReadyStockSummary();
@@ -2377,7 +2628,7 @@
         <div class="recipe-price-row"><span>Faturamento</span><b>${formatMoney(m.faturamento)}</b></div>
         <div class="recipe-price-row"><span>Lucro estimado</span><b>${formatMoney(m.lucro)}</b></div>
         <div class="recipe-price-row"><span>Caixas restantes</span><b>${formatNumber(m.restante, 0)}</b></div>
-        <div class="venda-fields" style="margin-top:10px;"><button class="btn btn-sm btn-icon btn-danger" data-action="excluir-caixa-mista" data-id="${box.id}" title="Excluir">${ICONS.trash}</button></div>
+        <div class="venda-fields" style="margin-top:10px;"><button class="btn btn-sm" data-action="editar-caixa-mista" data-id="${box.id}">${ICONS.edit} Editar</button><button class="btn btn-sm btn-icon btn-danger" data-action="excluir-caixa-mista" data-id="${box.id}" title="Excluir">${ICONS.trash}</button></div>
       </div>`;
     }).join('') : `<p class="confirm-text">Nenhuma caixa montada ainda.</p>`);
 
@@ -2582,7 +2833,9 @@
   // vendidas ou não).
   function getFinanceiroData(period, customFrom, customTo) {
     const comprasNoPeriodo = db.purchases.filter((p) => isDateInPeriod(p.dataCompra, period, customFrom, customTo));
-    const totalGastoCompras = comprasNoPeriodo.reduce((s, p) => s + (Number(p.valorTotal) || 0), 0);
+    const comprasMateriaisNoPeriodo = getMaterialPurchases().filter((p) => isDateInPeriod(p.dataCompra, period, customFrom, customTo));
+    const totalGastoCompras = comprasNoPeriodo.reduce((s, p) => s + (Number(p.valorTotal) || 0), 0)
+      + comprasMateriaisNoPeriodo.reduce((s, p) => s + (Number(p.valorTotal) || 0), 0);
 
     const producoesPorData = db.productions.filter((p) => isDateInPeriod(p.data, period, customFrom, customTo));
     const quantidadeProduzidaTotal = producoesPorData.reduce((s, p) => s + (Number(p.quantidadeProduzida) || 0), 0);
@@ -2622,7 +2875,7 @@
     return {
       totalGastoCompras, faturamentoTotal, custoVendasTotal, lucroTotal, quantidadeVendidaTotal,
       quantidadeProduzidaTotal, numeroProducoes, ticketMedio, receitaMaisProduzida, ingredienteMaisGasto,
-      temDados: numeroProducoes > 0 || comprasNoPeriodo.length > 0 || getMixedBoxes().length > 0,
+      temDados: numeroProducoes > 0 || comprasNoPeriodo.length > 0 || comprasMateriaisNoPeriodo.length > 0 || getMixedBoxes().length > 0,
       producoesListadas: [...producoesPorData].sort((a, b) => b.criadoEm - a.criadoEm),
     };
   }
@@ -2887,6 +3140,24 @@
       case 'novo-ingrediente':
         openIngredientModal(null);
         break;
+      case 'novo-material':
+        openMaterialModal();
+        break;
+      case 'comprar-material':
+        openMaterialPurchaseModal(id);
+        break;
+      case 'usar-material':
+        openMaterialUseModal(id);
+        break;
+      case 'excluir-material':
+        openConfirm({
+          title: 'Excluir material',
+          message: 'Isso apagará também o histórico de compras e baixas deste material.',
+          confirmLabel: 'Excluir',
+          danger: true,
+          onConfirm: () => { deleteMaterial(id); renderAll(); toast('Material excluído.', 'success'); },
+        });
+        break;
       case 'editar-ingrediente':
         openIngredientModal(id);
         break;
@@ -2993,6 +3264,9 @@
             renderAll(); toast('Produção excluída e estoque estornado.', 'success');
           },
         });
+        break;
+      case 'editar-caixa-mista':
+        openEditMixedBoxModal(id);
         break;
       case 'excluir-caixa-mista':
         openConfirm({
