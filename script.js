@@ -70,7 +70,7 @@
       productions: [],
       movements: [],
       calculations: [],
-      settings: { multiplicador: 3, caixasMistas: [], materiais: [], comprasMateriais: [], movimentosMateriais: [] },
+      settings: { multiplicador: 3, caixasMistas: [], materiais: [], comprasMateriais: [], movimentosMateriais: [], movimentosProdutosProntos: [] },
     };
   }
 
@@ -114,7 +114,7 @@
     tabelaResults.forEach((r) => { if (r.error) throw r.error; });
     const settingsRes = await sb.from('user_settings').select('payload').eq('user_id', userId).maybeSingle();
     if (settingsRes.error) throw settingsRes.error;
-    const loaded = { settings: (settingsRes.data && settingsRes.data.payload) ? settingsRes.data.payload : { multiplicador: 3, caixasMistas: [], materiais: [], comprasMateriais: [], movimentosMateriais: [] } };
+    const loaded = { settings: (settingsRes.data && settingsRes.data.payload) ? settingsRes.data.payload : { multiplicador: 3, caixasMistas: [], materiais: [], comprasMateriais: [], movimentosMateriais: [], movimentosProdutosProntos: [] } };
     TABELAS.forEach((t, i) => { loaded[t] = (tabelaResults[i].data || []).map((r) => r.payload); });
     return Object.assign(defaultDB(), loaded);
   }
@@ -753,8 +753,9 @@
   //     nunca um número inventado.
   function migrateProductions() {
     let changed = false;
-    if (!db.settings) { db.settings = { multiplicador: 3, caixasMistas: [], materiais: [], comprasMateriais: [], movimentosMateriais: [] }; changed = true; }
+    if (!db.settings) { db.settings = { multiplicador: 3, caixasMistas: [], materiais: [], comprasMateriais: [], movimentosMateriais: [], movimentosProdutosProntos: [] }; changed = true; }
     if (!Array.isArray(db.settings.caixasMistas)) { db.settings.caixasMistas = []; changed = true; }
+    if (!Array.isArray(db.settings.movimentosProdutosProntos)) { db.settings.movimentosProdutosProntos = []; changed = true; }
     if (!Array.isArray(db.settings.materiais)) { db.settings.materiais = []; changed = true; }
     if (!Array.isArray(db.settings.comprasMateriais)) { db.settings.comprasMateriais = []; changed = true; }
     if (!Array.isArray(db.settings.movimentosMateriais)) { db.settings.movimentosMateriais = []; changed = true; }
@@ -991,6 +992,7 @@
     if (!production) return { ok: false, message: 'Produção não encontrada.' };
     const allocated = getAllocatedFromProduction(id);
     if (allocated > EPS) return { ok: false, message: `Esta produção possui ${formatNumber(allocated, 0)} unidade(s) usadas em caixas. Exclua primeiro as caixas relacionadas.` };
+    db.settings.movimentosProdutosProntos = getReadyProductMovements().filter((m) => m.productionId !== id);
     reverseProduction(production);
     db.productions = db.productions.filter((p) => p.id !== id);
     saveDB();
@@ -1007,6 +1009,8 @@
     if (!production) return { ok: false, message: 'Produção não encontrada.' };
     const allocated = getAllocatedFromProduction(id);
     if (allocated > EPS) return { ok: false, message: `Esta produção possui ${formatNumber(allocated, 0)} unidade(s) usadas em caixas. Exclua primeiro as caixas relacionadas para editar.` };
+    const movedReady = getReadyMovementTotal(id);
+    const soldReady = Number(production.quantidadeVendida) || 0;
     const newRecipe = getRecipe(data.receitaId);
     if (!newRecipe) return { ok: false, message: 'Selecione uma receita válida.' };
     const newQuantidadeReceitas = Number(data.quantidadeReceitas) || 0;
@@ -1014,6 +1018,7 @@
     const newPesoUnitario = Number(data.pesoUnitario) || 0;
     if (newQuantidadeReceitas <= 0) return { ok: false, message: 'Informe quantas receitas foram feitas.' };
     if (newQuantidade <= 0) return { ok: false, message: 'Informe o rendimento real em unidades.' };
+    if (newQuantidade + EPS < soldReady + movedReady) return { ok: false, message: `A produção não pode ficar com menos de ${formatNumber(soldReady + movedReady, 0)} unidade(s), pois parte já foi vendida ou movimentada.` };
     if (newPesoUnitario < 0) return { ok: false, message: 'O peso por unidade não pode ser negativo.' };
 
     // Mapa do que seria devolvido, por ingrediente e por lote, se a produção
@@ -1076,11 +1081,49 @@
     }, 0);
   }
 
+  function getReadyProductMovements() {
+    if (!Array.isArray(db.settings.movimentosProdutosProntos)) db.settings.movimentosProdutosProntos = [];
+    return db.settings.movimentosProdutosProntos;
+  }
+
+  function getReadyMovementTotal(productionId) {
+    return getReadyProductMovements()
+      .filter((m) => m.productionId === productionId)
+      .reduce((s, m) => s + (Number(m.quantidade) || 0), 0);
+  }
+
   function getProductionReadyAvailable(production, ignoreBoxId) {
     const produced = Number(production.quantidadeProduzida) || 0;
     const soldDirect = Number(production.quantidadeVendida) || 0;
     const allocated = getAllocatedFromProduction(production.id, ignoreBoxId);
-    return Math.max(0, produced - soldDirect - allocated);
+    const moved = getReadyMovementTotal(production.id);
+    return Math.max(0, produced - soldDirect - allocated - moved);
+  }
+
+  function registerReadyProductMovement(productionId, data) {
+    const production = db.productions.find((p) => p.id === productionId);
+    if (!production) return { ok: false, message: 'Produção não encontrada.' };
+    const quantidade = Number(data.quantidade) || 0;
+    if (quantidade <= 0) return { ok: false, message: 'Informe uma quantidade maior que zero.' };
+    const disponivel = getProductionReadyAvailable(production);
+    if (quantidade > disponivel + EPS) {
+      return { ok: false, message: `Há apenas ${formatNumber(disponivel, 0)} unidade(s) disponíveis nesta produção.` };
+    }
+    getReadyProductMovements().push({
+      id: uid(), productionId: production.id, receitaId: production.receitaId,
+      receitaNome: production.receitaNome, tipo: data.tipo || 'Consumo próprio',
+      quantidade, data: data.data || todayISO(), observacoes: data.observacoes || '', criadoEm: Date.now(),
+    });
+    saveDB();
+    return { ok: true };
+  }
+
+  function deleteReadyProductMovement(id) {
+    const exists = getReadyProductMovements().some((m) => m.id === id);
+    if (!exists) return { ok: false, message: 'Movimentação não encontrada.' };
+    db.settings.movimentosProdutosProntos = getReadyProductMovements().filter((m) => m.id !== id);
+    saveDB();
+    return { ok: true };
   }
 
   function getReadyStockByRecipe(recipeId, ignoreBoxId) {
@@ -2198,31 +2241,50 @@
 
     else if (currentCalcTab === 'quantidade') {
       container.innerHTML = `
-        <div class="form-grid">
+        <div class="form-grid cols-3">
           <div class="field"><label>Receita</label><select id="calcReceita">${recipeOptions}</select></div>
-          <div class="field"><label>Quantidade desejada (un.)</label><input type="number" min="1" step="any" id="calcQtd" value="1"></div>
+          <div class="field"><label>Quantidade de receitas</label><input type="number" min="0.01" step="any" id="calcQtdReceitas" value="1"></div>
+          <div class="field"><label>Rendimento real (un.)</label><input type="number" min="1" step="any" id="calcQtd" value="1"></div>
+          <div class="field"><label>Peso por unidade (g)</label><input type="number" min="0" step="any" id="calcPeso" value=""></div>
         </div>
         <div class="recipe-cost-preview" id="calcPreview"></div>
         <div class="form-actions"><button class="btn btn-primary" id="calcSalvarBtn">Salvar cálculo</button></div>
       `;
-      const update = () => {
+      const read = () => {
         const r = getRecipe(document.getElementById('calcReceita').value);
-        const qtd = Number(document.getElementById('calcQtd').value) || 0;
-        const cost = computeRecipeCost(r);
-        const custo = cost.custoUnitario * qtd;
-        const venda = cost.valorVendaUnitario * qtd;
-        document.getElementById('calcPreview').innerHTML = previewHTML(custo, venda);
+        const qtdReceitas = Math.max(0, Number(document.getElementById('calcQtdReceitas').value) || 0);
+        const qtd = Math.max(0, Number(document.getElementById('calcQtd').value) || 0);
+        const peso = Math.max(0, Number(document.getElementById('calcPeso').value) || 0);
+        const base = computeRecipeCost(r);
+        const custoTotal = base.custoTotal * qtdReceitas;
+        const custoUnitario = qtd > 0 ? custoTotal / qtd : 0;
+        const multiplicador = Number(db.settings.multiplicador) || 3;
+        return { r, qtdReceitas, qtd, peso, custoTotal, custoUnitario, vendaUnitario: custoUnitario * multiplicador };
       };
-      document.getElementById('calcReceita').addEventListener('change', update);
-      document.getElementById('calcQtd').addEventListener('input', update);
+      const update = () => {
+        const c = read();
+        document.getElementById('calcPreview').innerHTML = `
+          ${previewHTML(c.custoTotal, c.custoTotal * (Number(db.settings.multiplicador) || 3))}
+          <div class="recipe-price-row"><span>Rendimento real</span><b>${formatNumber(c.qtd, 0)} un.${c.peso ? ` de ${formatNumber(c.peso, 0)} g` : ''}</b></div>
+          <div class="recipe-price-row"><span>Custo por unidade</span><b>${formatMoney(c.custoUnitario)}</b></div>
+          <div class="recipe-price-row"><span>Venda sugerida por unidade</span><b>${formatMoney(c.vendaUnitario)}</b></div>
+          <div class="recipe-price-row"><span>Venda sugerida do cento</span><b>${formatMoney(c.vendaUnitario * 100)}</b></div>`;
+      };
+      ['calcReceita','calcQtdReceitas','calcQtd','calcPeso'].forEach((id) => document.getElementById(id).addEventListener(id === 'calcReceita' ? 'change' : 'input', update));
+      const selected = getRecipe(document.getElementById('calcReceita').value);
+      document.getElementById('calcQtd').value = selected ? selected.rendimento : 1;
+      document.getElementById('calcPeso').value = selected ? (selected.pesoUnitarioPadrao || '') : '';
+      document.getElementById('calcReceita').addEventListener('change', () => {
+        const r = getRecipe(document.getElementById('calcReceita').value);
+        document.getElementById('calcQtd').value = r ? r.rendimento : 1;
+        document.getElementById('calcPeso').value = r ? (r.pesoUnitarioPadrao || '') : '';
+        update();
+      });
       update();
       document.getElementById('calcSalvarBtn').addEventListener('click', () => {
-        const r = getRecipe(document.getElementById('calcReceita').value);
-        const qtd = Number(document.getElementById('calcQtd').value) || 0;
-        const cost = computeRecipeCost(r);
-        const custo = cost.custoUnitario * qtd;
-        const venda = cost.valorVendaUnitario * qtd;
-        addCalculation({ tipo: 'quantidade', titulo: `${formatNumber(qtd, 0)}x ${r.nome}`, detalhes: { receitaId: r.id, receitaNome: r.nome, quantidade: qtd }, custoTotal: custo, valorVenda: venda });
+        const c = read();
+        if (c.qtdReceitas <= 0 || c.qtd <= 0) { toast('Informe a quantidade de receitas e o rendimento real.', 'danger'); return; }
+        addCalculation({ tipo: 'quantidade', titulo: `${formatNumber(c.qtd, 0)}x ${c.r.nome}${c.peso ? ` (${formatNumber(c.peso, 0)} g)` : ''}`, detalhes: { receitaId: c.r.id, receitaNome: c.r.nome, quantidadeReceitas: c.qtdReceitas, quantidade: c.qtd, pesoUnitario: c.peso }, custoTotal: c.custoTotal, valorVenda: c.vendaUnitario * c.qtd });
         renderAll();
         toast('Cálculo salvo no histórico.', 'success');
       });
@@ -2571,16 +2633,27 @@
     if (!el) return;
     if (!db.recipes.length) { el.innerHTML = ''; return; }
     if (!window.__mixedBoxDraft || !window.__mixedBoxDraft.length) window.__mixedBoxDraft = [{ rowId: uid(), receitaId: db.recipes[0].id, quantidadePorCaixa: 1 }];
+    if (!window.__mixedBoxFormDraft) window.__mixedBoxFormDraft = { nome: '', quantidadeCaixas: 1, embalagem: 0, preco: 0, data: todayISO(), observacoes: '' };
     const draft = window.__mixedBoxDraft;
+    const formDraft = window.__mixedBoxFormDraft;
+    const captureFormDraft = () => {
+      const byId = (id) => document.getElementById(id);
+      if (byId('mbNome')) formDraft.nome = byId('mbNome').value;
+      if (byId('mbQuantidadeCaixas')) formDraft.quantidadeCaixas = byId('mbQuantidadeCaixas').value;
+      if (byId('mbEmbalagem')) formDraft.embalagem = byId('mbEmbalagem').value;
+      if (byId('mbPreco')) formDraft.preco = byId('mbPreco').value;
+      if (byId('mbData')) formDraft.data = byId('mbData').value;
+      if (byId('mbObs')) formDraft.observacoes = byId('mbObs').value;
+    };
     el.innerHTML = `
       <h2 class="section-title">Montar caixa mista</h2>
       <div class="form-grid cols-3">
-        <div class="field"><label>Nome da caixa</label><input type="text" id="mbNome" placeholder="Ex.: Caixa 4 sabores"></div>
-        <div class="field"><label>Quantidade de caixas</label><input type="number" min="1" step="1" id="mbQuantidadeCaixas" value="1"></div>
-        <div class="field"><label>Custo da embalagem (cada)</label><input type="number" min="0" step="any" id="mbEmbalagem" value="0"></div>
-        <div class="field"><label>Preço de venda por caixa</label><input type="number" min="0" step="any" id="mbPreco" value="0"></div>
-        <div class="field"><label>Data</label><input type="date" id="mbData" value="${todayISO()}"></div>
-        <div class="field"><label>Observações</label><input type="text" id="mbObs" placeholder="Opcional"></div>
+        <div class="field"><label>Nome da caixa</label><input type="text" id="mbNome" placeholder="Ex.: Caixa 4 sabores" value="${escapeHtml(formDraft.nome || '')}"></div>
+        <div class="field"><label>Quantidade de caixas</label><input type="number" min="1" step="1" id="mbQuantidadeCaixas" value="${formDraft.quantidadeCaixas || 1}"></div>
+        <div class="field"><label>Custo da embalagem (cada)</label><input type="number" min="0" step="any" id="mbEmbalagem" value="${formDraft.embalagem || 0}"></div>
+        <div class="field"><label>Preço de venda por caixa</label><input type="number" min="0" step="any" id="mbPreco" value="${formDraft.preco || 0}"></div>
+        <div class="field"><label>Data</label><input type="date" id="mbData" value="${formDraft.data || todayISO()}"></div>
+        <div class="field"><label>Observações</label><input type="text" id="mbObs" placeholder="Opcional" value="${escapeHtml(formDraft.observacoes || '')}"></div>
       </div>
       <div id="mbRows" style="margin-top:12px;">${draft.map((item) => `
         <div class="caixa-item-row" data-row="${item.rowId}">
@@ -2593,7 +2666,8 @@
     `;
     el.querySelectorAll('[data-role="mb-receita"]').forEach((inp) => inp.addEventListener('change', (e) => { draft.find((x) => x.rowId === e.target.dataset.row).receitaId = e.target.value; }));
     el.querySelectorAll('[data-role="mb-qtd"]').forEach((inp) => inp.addEventListener('input', (e) => { draft.find((x) => x.rowId === e.target.dataset.row).quantidadePorCaixa = Number(e.target.value) || 0; }));
-    document.getElementById('mbAddRow').addEventListener('click', () => { draft.push({ rowId: uid(), receitaId: db.recipes[0].id, quantidadePorCaixa: 1 }); renderMixedBoxForm(); });
+    ['mbNome','mbQuantidadeCaixas','mbEmbalagem','mbPreco','mbData','mbObs'].forEach((id) => document.getElementById(id).addEventListener('input', captureFormDraft));
+    document.getElementById('mbAddRow').addEventListener('click', () => { captureFormDraft(); draft.push({ rowId: uid(), receitaId: db.recipes[0].id, quantidadePorCaixa: 1 }); renderMixedBoxForm(); });
     document.getElementById('mbMontarBtn').addEventListener('click', () => {
       const result = registerMixedBox({
         nome: document.getElementById('mbNome').value,
@@ -2606,6 +2680,7 @@
       });
       if (!result.ok) { toast(result.message, 'danger'); return; }
       window.__mixedBoxDraft = [];
+      window.__mixedBoxFormDraft = null;
       renderAll();
       toast('Caixas montadas e estoque pronto atualizado.', 'success');
     });
@@ -2643,6 +2718,30 @@
       renderAll();
       toast('Venda das caixas atualizada.', 'success');
     }));
+  }
+
+  function openReadyProductMovementModal(productionId) {
+    const p = db.productions.find((x) => x.id === productionId);
+    if (!p) return;
+    const available = getProductionReadyAvailable(p);
+    if (available <= EPS) { toast('Não há unidades disponíveis nesta produção.', 'warning'); return; }
+    openModal({
+      title: 'Movimentar brigadeiros prontos',
+      bodyHTML: `
+        <p class="confirm-text">Disponível nesta produção: <strong>${formatNumber(available, 0)} unidade(s)</strong>.</p>
+        <div class="form-grid cols-3">
+          <div class="field"><label>Tipo</label><select id="rpmTipo"><option>Consumo próprio</option><option>Degustação</option><option>Perda</option><option>Ajuste manual</option></select></div>
+          <div class="field"><label>Quantidade</label><input type="number" min="1" max="${available}" step="1" id="rpmQuantidade" value="1"></div>
+          <div class="field"><label>Data</label><input type="date" id="rpmData" value="${todayISO()}"></div>
+          <div class="field span-2"><label>Observações</label><input type="text" id="rpmObs" placeholder="Ex.: brigadeiros que sobraram de ontem"></div>
+        </div>`,
+      footerHTML: `<button class="btn btn-ghost" data-action="fechar-modal">Cancelar</button><button class="btn btn-primary" id="saveReadyMovementBtn">Registrar movimentação</button>`,
+      onMount: () => document.getElementById('saveReadyMovementBtn').addEventListener('click', () => {
+        const result = registerReadyProductMovement(productionId, { tipo: document.getElementById('rpmTipo').value, quantidade: document.getElementById('rpmQuantidade').value, data: document.getElementById('rpmData').value, observacoes: document.getElementById('rpmObs').value });
+        if (!result.ok) { toast(result.message, 'danger'); return; }
+        closeModal(); renderAll(); toast('Movimentação registrada e estoque pronto atualizado.', 'success');
+      }),
+    });
   }
 
   function renderProducaoLista() {
@@ -2683,7 +2782,9 @@
         <div class="recipe-price-row"><span>Faturamento total</span><b>${formatMoney(m.faturamento)}</b></div>
         <div class="recipe-price-row"><span>Lucro estimado (${formatNumber(m.margemLucro, 1)}%)</span><b>${formatMoney(m.lucro)}</b></div>
         <div class="recipe-price-row"><span>Quantidade restante</span><b>${formatNumber(m.quantidadeRestante, 0)} un.</b></div>
+        ${(getReadyProductMovements().filter((mov) => mov.productionId === p.id).length) ? `<div style="margin-top:10px;"><strong>Movimentações do produto pronto</strong>${getReadyProductMovements().filter((mov) => mov.productionId === p.id).sort((a,b) => b.criadoEm-a.criadoEm).map((mov) => `<div class="recipe-price-row"><span>${escapeHtml(mov.tipo)} · ${formatDateBR(mov.data)}${mov.observacoes ? ' — ' + escapeHtml(mov.observacoes) : ''}</span><b>-${formatNumber(mov.quantidade, 0)} un. <button class="btn btn-sm btn-icon btn-danger" data-action="excluir-movimento-pronto" data-id="${mov.id}" title="Excluir movimentação">${ICONS.trash}</button></b></div>`).join('')}</div>` : ''}
         <div class="venda-fields" style="margin-top:10px;">
+          <button class="btn btn-sm" data-action="movimentar-produto-pronto" data-id="${p.id}">${ICONS.move} Movimentar</button>
           <button class="btn btn-sm btn-icon" data-action="editar-producao" data-id="${p.id}" title="Editar">${ICONS.edit}</button>
           <button class="btn btn-sm btn-icon btn-danger" data-action="excluir-producao" data-id="${p.id}" title="Excluir">${ICONS.trash}</button>
         </div>
@@ -3212,6 +3313,8 @@
       }
       case 'remover-linha-caixa-mista': {
         const rowId = el.dataset.row;
+        if (!window.__mixedBoxFormDraft) window.__mixedBoxFormDraft = {};
+        [['mbNome','nome'],['mbQuantidadeCaixas','quantidadeCaixas'],['mbEmbalagem','embalagem'],['mbPreco','preco'],['mbData','data'],['mbObs','observacoes']].forEach(([domId,key]) => { const node = document.getElementById(domId); if (node) window.__mixedBoxFormDraft[key] = node.value; });
         window.__mixedBoxDraft = (window.__mixedBoxDraft || []).filter((i) => i.rowId !== rowId);
         if (!window.__mixedBoxDraft.length && db.recipes.length) window.__mixedBoxDraft = [{ rowId: uid(), receitaId: db.recipes[0].id, quantidadePorCaixa: 1 }];
         renderMixedBoxForm();
@@ -3248,6 +3351,12 @@
         currentFinanceiroPeriodo = el.dataset.periodo;
         if (currentFinanceiroPeriodo !== 'personalizado') { financeiroPeriodoCustomFrom = ''; financeiroPeriodoCustomTo = ''; }
         renderFinanceiro();
+        break;
+      case 'movimentar-produto-pronto':
+        openReadyProductMovementModal(id);
+        break;
+      case 'excluir-movimento-pronto':
+        openConfirm({ title: 'Excluir movimentação', message: 'A quantidade voltará ao estoque disponível desta produção.', confirmLabel: 'Excluir', danger: true, onConfirm: () => { deleteReadyProductMovement(id); renderAll(); toast('Movimentação excluída e estoque restaurado.', 'success'); } });
         break;
       case 'editar-producao':
         openEditProductionModal(id);
