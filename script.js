@@ -2787,48 +2787,68 @@
       const statusConfig = m.status === 'finalizada'
         ? { label: 'Finalizada', fundo: '#e8f6ee', texto: '#26734d', borda: '#bfe2ce' }
         : m.status === 'parcial'
-          ? { label: 'Parcialmente baixada', fundo: '#fff4df', texto: '#986414', borda: '#f1d39b' }
+          ? { label: 'Parcial', fundo: '#fff4df', texto: '#986414', borda: '#f1d39b' }
           : { label: 'Em estoque', fundo: '#eef3ff', texto: '#3e5f9c', borda: '#cbd8f2' };
       const movimentos = getReadyProductMovements().filter((mov) => mov.productionId === p.id);
+      const totalBaixado = m.quantidadeVendida + m.quantidadeAlocadaCaixas + m.quantidadeMovimentada;
       return `
-      <div class="producao-item" data-id="${p.id}" style="${m.status === 'finalizada' ? 'opacity:.82;background:#fcfcfc;' : ''}">
-        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">
-          <div class="info">
-            <strong>${escapeHtml(p.receitaNome)} · ${formatNumber(p.quantidadeProduzida, 0)} un.${p.pesoUnitario ? ` de ${formatNumber(p.pesoUnitario, 0)} g` : ''}</strong>
-            <div>${formatNumber(p.quantidadeReceitas || 1, 2)} receita(s) · ${formatDateBR(p.data)}${p.observacoes ? ' — ' + escapeHtml(p.observacoes) : ''}</div>
+      <div class="producao-item" data-id="${p.id}" style="padding:16px 18px;${m.status === 'finalizada' ? 'opacity:.86;background:#fcfcfc;' : ''}">
+        <div style="display:grid;grid-template-columns:minmax(230px,1.5fr) minmax(260px,1fr) auto;gap:16px;align-items:center;">
+          <div class="info" style="min-width:0;">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+              <strong style="font-size:15px;">${escapeHtml(p.receitaNome)}</strong>
+              <span style="display:inline-flex;align-items:center;padding:4px 8px;border-radius:999px;background:${statusConfig.fundo};color:${statusConfig.texto};border:1px solid ${statusConfig.borda};font-size:11px;font-weight:700;">${statusConfig.label}</span>
+            </div>
+            <div style="margin-top:4px;font-size:12px;opacity:.72;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${formatNumber(p.quantidadeProduzida, 0)} un.${p.pesoUnitario ? ` de ${formatNumber(p.pesoUnitario, 0)} g` : ''} · ${formatNumber(p.quantidadeReceitas || 1, 2)} receita(s) · ${formatDateBR(p.data)}${p.observacoes ? ' · ' + escapeHtml(p.observacoes) : ''}</div>
           </div>
-          <span style="display:inline-flex;align-items:center;padding:6px 10px;border-radius:999px;background:${statusConfig.fundo};color:${statusConfig.texto};border:1px solid ${statusConfig.borda};font-size:12px;font-weight:700;">${statusConfig.label}</span>
+
+          <div>
+            <div style="display:flex;justify-content:space-between;gap:10px;font-size:11px;margin-bottom:5px;"><span><strong>${formatNumber(totalBaixado, 0)}</strong> baixadas</span><span><strong>${formatNumber(m.quantidadeRestante, 0)}</strong> disponíveis</span></div>
+            <div style="height:7px;background:#eee5e1;border-radius:999px;overflow:hidden;"><div style="height:100%;width:${m.percentualBaixado}%;background:${statusConfig.texto};border-radius:999px;opacity:.65;"></div></div>
+          </div>
+
+          <div style="display:flex;align-items:center;gap:6px;justify-content:flex-end;">
+            ${m.quantidadeRestante > EPS ? `<button class="btn btn-sm" data-action="movimentar-produto-pronto" data-id="${p.id}">${ICONS.move} Movimentar</button>` : ''}
+            <button class="btn btn-sm" data-action="toggle-detalhes-producao" data-id="${p.id}">Ver detalhes</button>
+            <button class="btn btn-sm btn-icon" data-action="editar-producao" data-id="${p.id}" title="Editar">${ICONS.edit}</button>
+            <button class="btn btn-sm btn-icon btn-danger" data-action="excluir-producao" data-id="${p.id}" title="Excluir">${ICONS.trash}</button>
+          </div>
         </div>
 
-        <div style="margin:14px 0 8px;">
-          <div style="height:8px;background:#eee5e1;border-radius:999px;overflow:hidden;"><div style="height:100%;width:${m.percentualBaixado}%;background:currentColor;border-radius:999px;opacity:.55;"></div></div>
-          <div style="display:flex;justify-content:space-between;font-size:11px;opacity:.7;margin-top:4px;"><span>${formatNumber(m.percentualBaixado, 0)}% baixado</span><span>${formatNumber(m.quantidadeRestante, 0)} un. disponíveis</span></div>
+        <div style="display:grid;grid-template-columns:repeat(5,minmax(76px,1fr));gap:7px;margin-top:12px;">
+          <div style="padding:7px 9px;border-radius:9px;background:#faf5f2;"><span style="display:block;font-size:10px;opacity:.65;">Produzido</span><strong style="font-size:13px;">${formatNumber(m.quantidadeProduzida, 0)}</strong></div>
+          <div style="padding:7px 9px;border-radius:9px;background:#faf5f2;"><span style="display:block;font-size:10px;opacity:.65;">Vendido</span><strong style="font-size:13px;">${formatNumber(m.quantidadeVendida, 0)}</strong></div>
+          <div style="padding:7px 9px;border-radius:9px;background:#faf5f2;"><span style="display:block;font-size:10px;opacity:.65;">Caixinhas</span><strong style="font-size:13px;">${formatNumber(m.quantidadeAlocadaCaixas, 0)}</strong></div>
+          <div style="padding:7px 9px;border-radius:9px;background:#faf5f2;"><span style="display:block;font-size:10px;opacity:.65;">Movimentado</span><strong style="font-size:13px;">${formatNumber(m.quantidadeMovimentada, 0)}</strong></div>
+          <div style="padding:7px 9px;border-radius:9px;background:${m.quantidadeRestante <= EPS ? '#e8f6ee' : '#fff1eb'};"><span style="display:block;font-size:10px;opacity:.65;">Disponível</span><strong style="font-size:13px;">${formatNumber(m.quantidadeRestante, 0)}</strong></div>
         </div>
 
-        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(115px,1fr));gap:8px;margin:12px 0;">
-          <div style="padding:10px;border-radius:10px;background:#faf5f2;"><span style="display:block;font-size:11px;opacity:.68;">Produzido</span><strong>${formatNumber(m.quantidadeProduzida, 0)} un.</strong></div>
-          <div style="padding:10px;border-radius:10px;background:#faf5f2;"><span style="display:block;font-size:11px;opacity:.68;">Vendido</span><strong>${formatNumber(m.quantidadeVendida, 0)} un.</strong></div>
-          <div style="padding:10px;border-radius:10px;background:#faf5f2;"><span style="display:block;font-size:11px;opacity:.68;">Em caixinhas</span><strong>${formatNumber(m.quantidadeAlocadaCaixas, 0)} un.</strong></div>
-          <div style="padding:10px;border-radius:10px;background:#faf5f2;"><span style="display:block;font-size:11px;opacity:.68;">Movimentado</span><strong>${formatNumber(m.quantidadeMovimentada, 0)} un.</strong></div>
-          <div style="padding:10px;border-radius:10px;background:${m.quantidadeRestante <= EPS ? '#e8f6ee' : '#fff1eb'};"><span style="display:block;font-size:11px;opacity:.68;">Disponível</span><strong>${formatNumber(m.quantidadeRestante, 0)} un.</strong></div>
-        </div>
-
-        <div class="form-grid cols-3" style="margin:10px 0;">
-          <div class="field"><label>Qtd. vendida</label><input type="number" min="0" step="any" data-role="qtdVendida" data-id="${p.id}" value="${p.quantidadeVendida || ''}"></div>
-          <div class="field"><label>Preço de venda (un.)</label><input type="number" min="0" step="any" data-role="precoVenda" data-id="${p.id}" value="${p.precoVendaUnitario || ''}"></div>
-          <div class="field"><label>Data da venda</label><input type="date" data-role="dataVenda" data-id="${p.id}" value="${p.dataVenda || p.data}"></div>
-        </div>
-        ${!m.custoRegistrado ? `<div class="recipe-price-row"><span>Custo</span><b>Custo não registrado</b></div>` : `<div class="recipe-price-row"><span>Custo total da produção</span><b>${formatMoney(m.custoTotal)}</b></div><div class="recipe-price-row"><span>Custo das unidades vendidas</span><b>${formatMoney(m.custoVendido)}</b></div>`}
-        <div class="recipe-price-row"><span>Faturamento total</span><b>${formatMoney(m.faturamento)}</b></div>
-        <div class="recipe-price-row"><span>Lucro estimado (${formatNumber(m.margemLucro, 1)}%)</span><b>${formatMoney(m.lucro)}</b></div>
-        ${movimentos.length ? `<div style="margin-top:10px;"><strong>Movimentações do produto pronto</strong>${movimentos.sort((a,b) => b.criadoEm-a.criadoEm).map((mov) => `<div class="recipe-price-row"><span>${escapeHtml(mov.tipo)} · ${formatDateBR(mov.data)}${mov.observacoes ? ' — ' + escapeHtml(mov.observacoes) : ''}</span><b>-${formatNumber(mov.quantidade, 0)} un. <button class="btn btn-sm btn-icon btn-danger" data-action="excluir-movimento-pronto" data-id="${mov.id}" title="Excluir movimentação">${ICONS.trash}</button></b></div>`).join('')}</div>` : ''}
-        <div class="venda-fields" style="margin-top:10px;">
-          ${m.quantidadeRestante > EPS ? `<button class="btn btn-sm" data-action="movimentar-produto-pronto" data-id="${p.id}">${ICONS.move} Movimentar</button>` : ''}
-          <button class="btn btn-sm btn-icon" data-action="editar-producao" data-id="${p.id}" title="Editar">${ICONS.edit}</button>
-          <button class="btn btn-sm btn-icon btn-danger" data-action="excluir-producao" data-id="${p.id}" title="Excluir">${ICONS.trash}</button>
+        <div data-role="detalhes-producao" style="display:none;margin-top:14px;padding-top:14px;border-top:1px solid #ead8d1;">
+          <div class="form-grid cols-3" style="margin:0 0 10px;">
+            <div class="field"><label>Qtd. vendida</label><input type="number" min="0" step="any" data-role="qtdVendida" data-id="${p.id}" value="${p.quantidadeVendida || ''}"></div>
+            <div class="field"><label>Preço de venda (un.)</label><input type="number" min="0" step="any" data-role="precoVenda" data-id="${p.id}" value="${p.precoVendaUnitario || ''}"></div>
+            <div class="field"><label>Data da venda</label><input type="date" data-role="dataVenda" data-id="${p.id}" value="${p.dataVenda || p.data}"></div>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(4,minmax(130px,1fr));gap:8px;">
+            <div class="recipe-price-row"><span>Custo total</span><b>${m.custoRegistrado ? formatMoney(m.custoTotal) : 'Não registrado'}</b></div>
+            <div class="recipe-price-row"><span>Custo vendido</span><b>${m.custoRegistrado ? formatMoney(m.custoVendido) : '—'}</b></div>
+            <div class="recipe-price-row"><span>Faturamento</span><b>${formatMoney(m.faturamento)}</b></div>
+            <div class="recipe-price-row"><span>Lucro (${formatNumber(m.margemLucro, 1)}%)</span><b>${formatMoney(m.lucro)}</b></div>
+          </div>
+          ${movimentos.length ? `<div style="margin-top:12px;"><strong style="font-size:13px;">Movimentações do produto pronto</strong>${movimentos.sort((a,b) => b.criadoEm-a.criadoEm).map((mov) => `<div class="recipe-price-row"><span>${escapeHtml(mov.tipo)} · ${formatDateBR(mov.data)}${mov.observacoes ? ' — ' + escapeHtml(mov.observacoes) : ''}</span><b>-${formatNumber(mov.quantidade, 0)} un. <button class="btn btn-sm btn-icon btn-danger" data-action="excluir-movimento-pronto" data-id="${mov.id}" title="Excluir movimentação">${ICONS.trash}</button></b></div>`).join('')}</div>` : '<div style="font-size:12px;opacity:.65;margin-top:10px;">Nenhuma movimentação registrada.</div>'}
         </div>
       </div>`;
     }).join('');
+
+    list.querySelectorAll('[data-action="toggle-detalhes-producao"]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const row = list.querySelector(`.producao-item[data-id="${btn.dataset.id}"]`);
+        const detalhes = row.querySelector('[data-role="detalhes-producao"]');
+        const aberto = detalhes.style.display !== 'none';
+        detalhes.style.display = aberto ? 'none' : 'block';
+        btn.textContent = aberto ? 'Ver detalhes' : 'Ocultar detalhes';
+      });
+    });
 
     document.getElementById('toggleFinalizadas').addEventListener('change', (e) => {
       ocultarProducoesFinalizadas = e.target.checked;
