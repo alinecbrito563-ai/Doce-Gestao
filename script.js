@@ -2580,15 +2580,6 @@
         custoVendasTotal += m.custoVendido;
         quantidadeVendidaTotal += Number(b.quantidadeVendida) || 0;
       });
-    const gastosSuprimentosPorCategoria = {};
-    comprasMateriaisNoPeriodo.forEach((p) => {
-      const material = getMaterial(p.materialId);
-      const categoria = material && material.categoria ? material.categoria : 'Embalagens';
-      gastosSuprimentosPorCategoria[categoria] = (gastosSuprimentosPorCategoria[categoria] || 0) + (Number(p.valorTotal) || 0);
-    });
-    const totalGastoIngredientes = comprasNoPeriodo.reduce((s, p) => s + (Number(p.valorTotal) || 0), 0);
-    const totalGastoSuprimentos = comprasMateriaisNoPeriodo.reduce((s, p) => s + (Number(p.valorTotal) || 0), 0);
-
     const lucroTotal = faturamentoTotal - custoVendasTotal;
     const margemTotal = faturamentoTotal > 0 ? (lucroTotal / faturamentoTotal) * 100 : 0;
 
