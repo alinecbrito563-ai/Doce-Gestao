@@ -520,11 +520,11 @@
     const valorTotalInformado = Number(data.valorTotal);
     const valorTotal = Number.isFinite(valorTotalInformado) ? valorTotalInformado : (Number(p.valorTotal) || 0);
     p.marca = data.marca || '';
+    // Sempre persiste os valores informados. Isso também corrige lotes antigos
+    // que ficaram com `quantidade`, `quantidadeBase` ou saldo divergentes.
     p.quantidade = quantidade;
-    if (quantidadeFoiAlterada) {
-      p.quantidadeBase = quantidadeBase;
-      p.quantidadeRestanteBase = quantidadeBase - consumedBase;
-    }
+    p.quantidadeBase = quantidadeBase;
+    p.quantidadeRestanteBase = Math.max(0, quantidadeBase - consumedBase);
     p.valorTotal = valorTotal;
     p.valorUnitario = quantidade > 0 ? valorTotal / quantidade : 0;
     p.considerarFinanceiro = data.considerarFinanceiro !== false;
@@ -2151,11 +2151,13 @@
           if (editing) {
             const result = updatePurchase(editing.id, data);
             if (!result.ok) { toast(result.message, 'danger'); return; }
-            toast('Compra atualizada.', 'success');
-          } else {
-            addPurchase(ingredienteId, data);
-            toast('Compra registrada.', 'success');
+            closeModal();
+            renderAll();
+            toast(`Compra atualizada: ${formatNumber(Number(data.quantidade), 2)} ${ing.unidade} por ${formatMoney(Number(data.valorTotal))}.`, 'success');
+            return;
           }
+          addPurchase(ingredienteId, data);
+          toast('Compra registrada.', 'success');
           renderAll();
           openPurchaseModal(ingredienteId); // reabre limpo para continuar cadastrando
         });
