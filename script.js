@@ -1448,8 +1448,44 @@
     const quantidade = Number(data.quantidade) || 0;
     const valorTotal = Number(data.valorTotal) || 0;
     if (quantidade <= 0) return { ok: false, message: 'Informe uma quantidade válida.' };
-    getMaterialPurchases().push({ id: uid(), materialId, quantidade, valorTotal, custoUnitario: valorTotal / quantidade, dataCompra: data.dataCompra || todayISO(), observacao: data.observacao || '', criadoEm: Date.now() });
+    getMaterialPurchases().push({
+      id: uid(), materialId, quantidade, valorTotal,
+      custoUnitario: valorTotal / quantidade,
+      dataCompra: data.dataCompra || todayISO(),
+      observacao: data.observacao || '',
+      considerarFinanceiro: data.considerarFinanceiro !== false,
+      origem: data.origem || (data.considerarFinanceiro === false ? 'Estoque inicial' : 'Compra'),
+      criadoEm: Date.now(),
+    });
     saveDB(); return { ok: true };
+  }
+
+  function updateMaterialPurchase(id, data) {
+    const compra = getMaterialPurchases().find((p) => p.id === id);
+    if (!compra) return { ok: false, message: 'Compra de suprimento não encontrada.' };
+    const quantidade = Number(data.quantidade) || 0;
+    const valorTotal = Number(data.valorTotal) || 0;
+    if (quantidade <= 0) return { ok: false, message: 'Informe uma quantidade válida.' };
+
+    const totalOutrasCompras = getMaterialPurchases()
+      .filter((p) => p.materialId === compra.materialId && p.id !== id)
+      .reduce((s, p) => s + (Number(p.quantidade) || 0), 0);
+    const totalBaixas = getMaterialMovements()
+      .filter((m) => m.materialId === compra.materialId)
+      .reduce((s, m) => s + (Number(m.quantidade) || 0), 0);
+    if (totalOutrasCompras + quantidade < totalBaixas - EPS) {
+      return { ok: false, message: `Não é possível reduzir as compras para menos do que já foi usado (${formatNumber(totalBaixas, 2)} no total).` };
+    }
+
+    compra.quantidade = quantidade;
+    compra.valorTotal = valorTotal;
+    compra.custoUnitario = valorTotal / quantidade;
+    compra.dataCompra = data.dataCompra || compra.dataCompra;
+    compra.observacao = data.observacao || '';
+    compra.considerarFinanceiro = data.considerarFinanceiro !== false;
+    compra.origem = data.origem || (compra.considerarFinanceiro ? 'Compra' : 'Estoque inicial');
+    saveDB();
+    return { ok: true };
   }
 
   function addMaterialUse(materialId, data) {
@@ -1503,22 +1539,62 @@
     });
   }
 
-  function openMaterialPurchaseModal(id) {
-    const material = getMaterial(id); if (!material) return;
+  function openMaterialPurchaseModal(materialId, purchaseId) {
+    const material = getMaterial(materialId); if (!material) return;
+    const editing = Boolean(purchaseId);
+    const compra = editing ? getMaterialPurchases().find((p) => p.id === purchaseId) : null;
+    if (editing && !compra) return;
+    const considerar = compra ? compra.considerarFinanceiro !== false : true;
+    const origemAtual = compra ? (compra.origem || (considerar ? 'Compra' : 'Estoque inicial')) : 'Compra';
+    const origemOption = (value) => `<option value="${value}" ${origemAtual === value ? 'selected' : ''}>${value}</option>`;
     openModal({
-      title: `Comprar — ${material.nome}`,
+      title: `${editing ? 'Editar compra' : 'Comprar'} — ${material.nome}`,
       bodyHTML: `<div class="form-grid">
-        <div class="field"><label>Quantidade comprada</label><input type="number" min="0.01" step="any" id="matCompraQtd"></div>
-        <div class="field"><label>Valor total pago</label><input type="number" min="0" step="any" id="matCompraValor"></div>
-        <div class="field"><label>Data da compra</label><input type="date" id="matCompraData" value="${todayISO()}"></div>
-        <div class="field"><label>Observação</label><input id="matCompraObs" placeholder="Loja, pedido..."></div>
+        <div class="field"><label>Quantidade comprada</label><input type="number" min="0.01" step="any" id="matCompraQtd" value="${compra ? Number(compra.quantidade) || 0 : ''}"></div>
+        <div class="field"><label>Valor total</label><input type="number" min="0" step="any" id="matCompraValor" value="${compra ? Number(compra.valorTotal) || 0 : ''}"></div>
+        <div class="field"><label>Data</label><input type="date" id="matCompraData" value="${compra ? compra.dataCompra : todayISO()}"></div>
+        <div class="field"><label>Origem</label><select id="matCompraOrigem">
+          ${origemOption('Compra')}${origemOption('Estoque inicial')}${origemOption('Doação')}${origemOption('Presente')}${origemOption('Outro')}
+        </select></div>
+        <div class="field span-2"><label class="checkbox-row"><input type="checkbox" id="matCompraFinanceiro" ${considerar ? 'checked' : ''}> Considerar esta compra no Financeiro</label></div>
+        <div class="field span-2"><label>Observação</label><input id="matCompraObs" value="${compra ? escapeHtml(compra.observacao || '') : ''}" placeholder="Loja, pedido..."></div>
       </div>`,
-      footerHTML: `<button class="btn btn-ghost" data-action="fechar-modal">Cancelar</button><button class="btn btn-primary" id="salvarCompraMaterialBtn">Registrar compra</button>`,
-      onMount: () => document.getElementById('salvarCompraMaterialBtn').addEventListener('click', () => {
-        const result = addMaterialPurchase(id, { quantidade: document.getElementById('matCompraQtd').value, valorTotal: document.getElementById('matCompraValor').value, dataCompra: document.getElementById('matCompraData').value, observacao: document.getElementById('matCompraObs').value });
-        if (!result.ok) { toast(result.message, 'danger'); return; }
-        closeModal(); renderAll(); toast('Compra registrada no estoque e no financeiro.', 'success');
-      }),
+      footerHTML: `<button class="btn btn-ghost" data-action="fechar-modal">Cancelar</button><button class="btn btn-primary" id="salvarCompraMaterialBtn">${editing ? 'Salvar alterações' : 'Registrar compra'}</button>`,
+      onMount: () => {
+        const financeiro = document.getElementById('matCompraFinanceiro');
+        const origem = document.getElementById('matCompraOrigem');
+        origem.addEventListener('change', () => {
+          if (origem.value !== 'Compra') financeiro.checked = false;
+        });
+        document.getElementById('salvarCompraMaterialBtn').addEventListener('click', () => {
+          const data = {
+            quantidade: document.getElementById('matCompraQtd').value,
+            valorTotal: document.getElementById('matCompraValor').value,
+            dataCompra: document.getElementById('matCompraData').value,
+            origem: origem.value,
+            considerarFinanceiro: financeiro.checked,
+            observacao: document.getElementById('matCompraObs').value,
+          };
+          const result = editing ? updateMaterialPurchase(purchaseId, data) : addMaterialPurchase(materialId, data);
+          if (!result.ok) { toast(result.message, 'danger'); return; }
+          closeModal(); renderAll(); toast(editing ? 'Compra do suprimento atualizada.' : 'Compra registrada.', 'success');
+        });
+      },
+    });
+  }
+
+  function openMaterialPurchasesModal(materialId) {
+    const material = getMaterial(materialId); if (!material) return;
+    const compras = getMaterialPurchases().filter((p) => p.materialId === materialId).sort((a,b) => (b.criadoEm||0)-(a.criadoEm||0));
+    openModal({
+      title: `Compras — ${material.nome}`,
+      wide: true,
+      bodyHTML: compras.length ? `<div class="purchase-list">${compras.map((p) => `
+        <div class="purchase-row">
+          <div><strong>${formatNumber(p.quantidade, 2)} ${escapeHtml(material.unidade)}</strong><small>${formatDateBR(p.dataCompra)} · ${formatMoney(p.valorTotal)} · ${escapeHtml(p.origem || (p.considerarFinanceiro === false ? 'Estoque inicial' : 'Compra'))}</small></div>
+          <div style="display:flex;align-items:center;gap:8px;"><span class="tag-badge tag-${p.considerarFinanceiro === false ? 'muted' : 'ok'}">${p.considerarFinanceiro === false ? 'Não afeta caixa' : 'Financeiro'}</span><button class="btn btn-sm" data-action="editar-compra-material" data-id="${p.id}" data-material-id="${materialId}">${ICONS.edit} Editar</button></div>
+        </div>`).join('')}</div>` : `<div class="empty-state">Nenhuma compra registrada.</div>`,
+      footerHTML: `<button class="btn btn-ghost" data-action="fechar-modal">Fechar</button>`,
     });
   }
 
@@ -1917,7 +1993,7 @@
             const saldo = getMaterialStock(m.id);
             const baixo = saldo <= (Number(m.estoqueMinimo) || 0);
             const compras = getMaterialPurchases().filter((p) => p.materialId === m.id);
-            const gasto = compras.reduce((t, p) => t + (Number(p.valorTotal) || 0), 0);
+            const gasto = compras.filter((p) => p.considerarFinanceiro !== false).reduce((t, p) => t + (Number(p.valorTotal) || 0), 0);
             const movimentos = getMaterialMovements().filter((mov) => mov.materialId === m.id);
             return `<div class="ing-card">
               <div class="ing-card-top"><h3>${escapeHtml(m.nome)}</h3><span class="tag-badge tag-${baixo ? 'warn' : 'ok'}">${baixo ? 'Estoque baixo' : 'Estoque ok'}</span></div>
@@ -1928,6 +2004,7 @@
               <div class="ing-actions">
                 <button class="btn btn-sm" data-action="editar-material" data-id="${m.id}">${ICONS.edit} Editar</button>
                 <button class="btn btn-sm" data-action="comprar-material" data-id="${m.id}">${ICONS.cart} Comprar</button>
+                <button class="btn btn-sm" data-action="ver-compras-material" data-id="${m.id}">Compras (${compras.length})</button>
                 <button class="btn btn-sm" data-action="usar-material" data-id="${m.id}">${ICONS.move} Dar baixa</button>
                 <button class="btn btn-sm btn-danger" data-action="excluir-material" data-id="${m.id}">${ICONS.trash}</button>
               </div>
@@ -3256,7 +3333,7 @@
   // vendidas ou não).
   function getFinanceiroData(period, customFrom, customTo) {
     const comprasNoPeriodo = db.purchases.filter((p) => p.considerarFinanceiro !== false && isDateInPeriod(p.dataCompra, period, customFrom, customTo));
-    const comprasMateriaisNoPeriodo = getMaterialPurchases().filter((p) => isDateInPeriod(p.dataCompra, period, customFrom, customTo));
+    const comprasMateriaisNoPeriodo = getMaterialPurchases().filter((p) => p.considerarFinanceiro !== false && isDateInPeriod(p.dataCompra, period, customFrom, customTo));
     const investimentosNoPeriodo = getInvestments().filter((x) => isDateInPeriod(x.dataCompra, period, customFrom, customTo));
     const totalGastoCompras = comprasNoPeriodo.reduce((s, p) => s + (Number(p.valorTotal) || 0), 0)
       + comprasMateriaisNoPeriodo.reduce((s, p) => s + (Number(p.valorTotal) || 0), 0);
@@ -3673,6 +3750,14 @@
       case 'comprar-material':
         openMaterialPurchaseModal(id);
         break;
+      case 'ver-compras-material':
+        openMaterialPurchasesModal(id);
+        break;
+      case 'editar-compra-material': {
+        const materialId = target.dataset.materialId;
+        openMaterialPurchaseModal(materialId, id);
+        break;
+      }
       case 'usar-material':
         openMaterialUseModal(id);
         break;
