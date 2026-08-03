@@ -3754,7 +3754,7 @@
         openMaterialPurchasesModal(id);
         break;
       case 'editar-compra-material': {
-        const materialId = target.dataset.materialId;
+        const materialId = el.dataset.materialId;
         openMaterialPurchaseModal(materialId, id);
         break;
       }
