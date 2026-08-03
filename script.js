@@ -70,7 +70,7 @@
       productions: [],
       movements: [],
       calculations: [],
-      settings: { multiplicador: 3, caixasMistas: [], materiais: [], comprasMateriais: [], movimentosMateriais: [], movimentosProdutosProntos: [] },
+      settings: { multiplicador: 3, caixasMistas: [], materiais: [], comprasMateriais: [], movimentosMateriais: [], investimentos: [], movimentosProdutosProntos: [] },
     };
   }
 
@@ -114,7 +114,7 @@
     tabelaResults.forEach((r) => { if (r.error) throw r.error; });
     const settingsRes = await sb.from('user_settings').select('payload').eq('user_id', userId).maybeSingle();
     if (settingsRes.error) throw settingsRes.error;
-    const loaded = { settings: (settingsRes.data && settingsRes.data.payload) ? settingsRes.data.payload : { multiplicador: 3, caixasMistas: [], materiais: [], comprasMateriais: [], movimentosMateriais: [], movimentosProdutosProntos: [] } };
+    const loaded = { settings: (settingsRes.data && settingsRes.data.payload) ? settingsRes.data.payload : { multiplicador: 3, caixasMistas: [], materiais: [], comprasMateriais: [], movimentosMateriais: [], investimentos: [], movimentosProdutosProntos: [] } };
     TABELAS.forEach((t, i) => { loaded[t] = (tabelaResults[i].data || []).map((r) => r.payload); });
     return Object.assign(defaultDB(), loaded);
   }
@@ -753,12 +753,13 @@
   //     nunca um número inventado.
   function migrateProductions() {
     let changed = false;
-    if (!db.settings) { db.settings = { multiplicador: 3, caixasMistas: [], materiais: [], comprasMateriais: [], movimentosMateriais: [], movimentosProdutosProntos: [] }; changed = true; }
+    if (!db.settings) { db.settings = { multiplicador: 3, caixasMistas: [], materiais: [], comprasMateriais: [], movimentosMateriais: [], investimentos: [], movimentosProdutosProntos: [] }; changed = true; }
     if (!Array.isArray(db.settings.caixasMistas)) { db.settings.caixasMistas = []; changed = true; }
     if (!Array.isArray(db.settings.movimentosProdutosProntos)) { db.settings.movimentosProdutosProntos = []; changed = true; }
     if (!Array.isArray(db.settings.materiais)) { db.settings.materiais = []; changed = true; }
     if (!Array.isArray(db.settings.comprasMateriais)) { db.settings.comprasMateriais = []; changed = true; }
     if (!Array.isArray(db.settings.movimentosMateriais)) { db.settings.movimentosMateriais = []; changed = true; }
+    if (!Array.isArray(db.settings.investimentos)) { db.settings.investimentos = []; changed = true; }
     db.productions.forEach((p) => {
       if (typeof p.quantidadeReceitas !== 'number') {
         const receita = getRecipe(p.receitaId);
@@ -1382,6 +1383,7 @@
     if (!Array.isArray(db.settings.materiais)) db.settings.materiais = [];
     if (!Array.isArray(db.settings.comprasMateriais)) db.settings.comprasMateriais = [];
     if (!Array.isArray(db.settings.movimentosMateriais)) db.settings.movimentosMateriais = [];
+    if (!Array.isArray(db.settings.investimentos)) db.settings.investimentos = [];
     db.settings.materiais.forEach((m) => { if (!m.categoria) m.categoria = 'Embalagens'; });
   }
 
@@ -1495,6 +1497,103 @@
         const result = addMaterialUse(id, { quantidade: document.getElementById('matUsoQtd').value, tipo: document.getElementById('matUsoTipo').value, data: document.getElementById('matUsoData').value, observacao: document.getElementById('matUsoObs').value });
         if (!result.ok) { toast(result.message, 'danger'); return; }
         closeModal(); renderAll(); toast('Baixa registrada.', 'success');
+      }),
+    });
+  }
+
+
+  function getInvestments() {
+    ensureMaterialData();
+    return db.settings.investimentos;
+  }
+
+  function getInvestment(id) {
+    return getInvestments().find((x) => x.id === id);
+  }
+
+  function addInvestment(data) {
+    const nome = String(data.nome || '').trim();
+    const valor = Number(data.valor) || 0;
+    if (!nome) return { ok: false, message: 'Informe o nome do investimento.' };
+    if (valor < 0) return { ok: false, message: 'O valor não pode ser negativo.' };
+    const record = {
+      id: uid(),
+      nome,
+      categoria: data.categoria || 'Utensílios',
+      marca: data.marca || '',
+      quantidade: Math.max(1, Number(data.quantidade) || 1),
+      valor,
+      dataCompra: data.dataCompra || todayISO(),
+      garantiaAte: data.garantiaAte || '',
+      observacao: data.observacao || '',
+      criadoEm: Date.now(),
+    };
+    db.settings.investimentos.push(record);
+    saveDB();
+    return { ok: true, investimento: record };
+  }
+
+  function updateInvestment(id, data) {
+    const record = getInvestment(id);
+    if (!record) return { ok: false, message: 'Investimento não encontrado.' };
+    const nome = String(data.nome || '').trim();
+    const valor = Number(data.valor) || 0;
+    if (!nome) return { ok: false, message: 'Informe o nome do investimento.' };
+    if (valor < 0) return { ok: false, message: 'O valor não pode ser negativo.' };
+    record.nome = nome;
+    record.categoria = data.categoria || 'Utensílios';
+    record.marca = data.marca || '';
+    record.quantidade = Math.max(1, Number(data.quantidade) || 1);
+    record.valor = valor;
+    record.dataCompra = data.dataCompra || record.dataCompra || todayISO();
+    record.garantiaAte = data.garantiaAte || '';
+    record.observacao = data.observacao || '';
+    saveDB();
+    return { ok: true };
+  }
+
+  function deleteInvestment(id) {
+    db.settings.investimentos = getInvestments().filter((x) => x.id !== id);
+    saveDB();
+  }
+
+  function openInvestmentModal(id) {
+    const editing = id ? getInvestment(id) : null;
+    openModal({
+      title: editing ? 'Editar investimento' : 'Novo investimento',
+      wide: true,
+      bodyHTML: `<div class="form-grid cols-3">
+        <div class="field span-2"><label>Item</label><input id="invNome" value="${editing ? escapeHtml(editing.nome) : ''}" placeholder="Ex.: Panela, espátula, balança, forno..."></div>
+        <div class="field"><label>Categoria</label>
+          <select id="invCategoria">
+            ${['Utensílios', 'Equipamentos', 'Móveis', 'Estrutura', 'Outros'].map((c) => `<option value="${c}" ${editing && editing.categoria === c ? 'selected' : ''}>${c}</option>`).join('')}
+          </select>
+        </div>
+        <div class="field"><label>Marca</label><input id="invMarca" value="${editing ? escapeHtml(editing.marca || '') : ''}" placeholder="Opcional"></div>
+        <div class="field"><label>Quantidade</label><input type="number" min="1" step="1" id="invQuantidade" value="${editing ? Number(editing.quantidade) || 1 : 1}"></div>
+        <div class="field"><label>Valor total pago</label><input type="number" min="0" step="any" id="invValor" value="${editing ? Number(editing.valor) || 0 : ''}" placeholder="0,00"></div>
+        <div class="field"><label>Data da compra</label><input type="date" id="invData" value="${editing ? editing.dataCompra : todayISO()}"></div>
+        <div class="field"><label>Garantia até</label><input type="date" id="invGarantia" value="${editing ? editing.garantiaAte || '' : ''}"></div>
+        <div class="field span-2"><label>Observação</label><input id="invObs" value="${editing ? escapeHtml(editing.observacao || '') : ''}" placeholder="Loja, modelo, número do pedido..."></div>
+      </div>
+      <p class="confirm-text" style="margin-top:12px;">Esse item entra no Financeiro como investimento, mas não possui baixa de estoque.</p>`,
+      footerHTML: `<button class="btn btn-ghost" data-action="fechar-modal">Cancelar</button><button class="btn btn-primary" id="salvarInvestimentoBtn">${editing ? 'Salvar alterações' : 'Registrar investimento'}</button>`,
+      onMount: () => document.getElementById('salvarInvestimentoBtn').addEventListener('click', () => {
+        const data = {
+          nome: document.getElementById('invNome').value,
+          categoria: document.getElementById('invCategoria').value,
+          marca: document.getElementById('invMarca').value,
+          quantidade: document.getElementById('invQuantidade').value,
+          valor: document.getElementById('invValor').value,
+          dataCompra: document.getElementById('invData').value,
+          garantiaAte: document.getElementById('invGarantia').value,
+          observacao: document.getElementById('invObs').value,
+        };
+        const result = editing ? updateInvestment(editing.id, data) : addInvestment(data);
+        if (!result.ok) { toast(result.message, 'danger'); return; }
+        closeModal();
+        renderAll();
+        toast(editing ? 'Investimento atualizado.' : 'Investimento registrado no Financeiro.', 'success');
       }),
     });
   }
@@ -1714,7 +1813,50 @@
       <div class="calc-tabs" style="grid-column:1/-1;margin-bottom:18px;">
         <button class="calc-tab ${currentEstoqueTab === 'controlados' ? 'active' : ''}" data-action="estoque-tab" data-tab="controlados">Ingredientes controlados</button>
         <button class="calc-tab ${currentEstoqueTab === 'suprimentos' ? 'active' : ''}" data-action="estoque-tab" data-tab="suprimentos">Suprimentos</button>
+        <button class="calc-tab ${currentEstoqueTab === 'investimentos' ? 'active' : ''}" data-action="estoque-tab" data-tab="investimentos">Investimentos</button>
       </div>`;
+
+    if (currentEstoqueTab === 'investimentos') {
+      const investimentos = getInvestments()
+        .filter((x) => x.nome.toLowerCase().includes(term))
+        .sort((a, b) => (b.dataCompra || '').localeCompare(a.dataCompra || '') || a.nome.localeCompare(b.nome, 'pt-BR'));
+      const totalInvestido = investimentos.reduce((s, x) => s + (Number(x.valor) || 0), 0);
+      grid.innerHTML = tabsHTML + `
+        <div style="grid-column:1/-1;display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px;">
+          <div>
+            <h2 class="section-title" style="margin:0;">Investimentos e equipamentos</h2>
+            <p class="confirm-text" style="margin:4px 0 0;">Utensílios, equipamentos e estrutura que não são consumidos pelo estoque.</p>
+          </div>
+          <button class="btn btn-primary btn-sm" data-action="novo-investimento">${ICONS.plus} Novo investimento</button>
+        </div>
+        <div class="panel" style="grid-column:1/-1;margin-bottom:8px;">
+          <div class="mini-row"><span class="name">Total investido nos itens exibidos</span><span class="value">${formatMoney(totalInvestido)}</span></div>
+        </div>
+        ${investimentos.length ? investimentos.map((x) => `
+          <div class="ing-card">
+            <div class="ing-card-top">
+              <h3>${escapeHtml(x.nome)}</h3>
+              <span class="tag-badge tag-ok">${escapeHtml(x.categoria || 'Utensílios')}</span>
+            </div>
+            <div class="ing-qty"><b>${formatMoney(x.valor)}</b> investidos</div>
+            <div class="ing-meta">
+              <span>${formatNumber(x.quantidade || 1, 0)} un.</span>
+              <span>Compra: ${formatDateBR(x.dataCompra)}</span>
+            </div>
+            <div class="ing-meta">
+              <span>${x.marca ? `Marca: ${escapeHtml(x.marca)}` : 'Sem marca informada'}</span>
+              <span>${x.garantiaAte ? `Garantia: ${formatDateBR(x.garantiaAte)}` : 'Sem garantia informada'}</span>
+            </div>
+            ${x.observacao ? `<p class="confirm-text">${escapeHtml(x.observacao)}</p>` : ''}
+            <div class="ing-actions">
+              <button class="btn btn-sm" data-action="editar-investimento" data-id="${x.id}">${ICONS.edit} Editar</button>
+              <button class="btn btn-sm btn-danger" data-action="excluir-investimento" data-id="${x.id}">${ICONS.trash} Excluir</button>
+            </div>
+          </div>
+        `).join('') : `<div class="empty-state">${ICONS.box2}<strong>Nenhum investimento encontrado</strong>Cadastre panelas, espátulas, formas, balanças, eletrodomésticos e outros bens.</div>`}
+      `;
+      return;
+    }
 
     if (currentEstoqueTab === 'suprimentos') {
       const categorias = ['Confeitos', 'Embalagens', 'Descartáveis', 'Limpeza', 'Outros'];
@@ -3046,8 +3188,11 @@
   function getFinanceiroData(period, customFrom, customTo) {
     const comprasNoPeriodo = db.purchases.filter((p) => isDateInPeriod(p.dataCompra, period, customFrom, customTo));
     const comprasMateriaisNoPeriodo = getMaterialPurchases().filter((p) => isDateInPeriod(p.dataCompra, period, customFrom, customTo));
+    const investimentosNoPeriodo = getInvestments().filter((x) => isDateInPeriod(x.dataCompra, period, customFrom, customTo));
     const totalGastoCompras = comprasNoPeriodo.reduce((s, p) => s + (Number(p.valorTotal) || 0), 0)
       + comprasMateriaisNoPeriodo.reduce((s, p) => s + (Number(p.valorTotal) || 0), 0);
+    const totalInvestimentos = investimentosNoPeriodo.reduce((s, x) => s + (Number(x.valor) || 0), 0);
+    const desembolsoTotal = totalGastoCompras + totalInvestimentos;
 
     const producoesPorData = db.productions.filter((p) => isDateInPeriod(p.data, period, customFrom, customTo));
     const quantidadeProduzidaTotal = producoesPorData.reduce((s, p) => s + (Number(p.quantidadeProduzida) || 0), 0);
@@ -3094,9 +3239,9 @@
     });
 
     return {
-      totalGastoCompras, totalGastoIngredientes, totalGastoSuprimentos, gastosSuprimentosPorCategoria, faturamentoTotal, custoVendasTotal, lucroTotal, quantidadeVendidaTotal,
+      totalGastoCompras, totalGastoIngredientes, totalGastoSuprimentos, totalInvestimentos, desembolsoTotal, gastosSuprimentosPorCategoria, faturamentoTotal, custoVendasTotal, lucroTotal, quantidadeVendidaTotal,
       quantidadeProduzidaTotal, numeroProducoes, ticketMedio, receitaMaisProduzida, ingredienteMaisGasto,
-      temDados: numeroProducoes > 0 || comprasNoPeriodo.length > 0 || comprasMateriaisNoPeriodo.length > 0 || getMixedBoxes().length > 0,
+      temDados: numeroProducoes > 0 || comprasNoPeriodo.length > 0 || comprasMateriaisNoPeriodo.length > 0 || investimentosNoPeriodo.length > 0 || getMixedBoxes().length > 0,
       producoesListadas: [...producoesPorData].sort((a, b) => b.criadoEm - a.criadoEm),
     };
   }
@@ -3125,7 +3270,12 @@
         <div class="stat-card tone-warn">
           <div class="stat-icon">${ICONS.cart}</div>
           <div class="stat-value">${formatMoney(data.totalGastoCompras)}</div>
-          <div class="stat-label">Total gasto em compras</div>
+          <div class="stat-label">Gastos operacionais</div>
+        </div>
+        <div class="stat-card tone-primary">
+          <div class="stat-icon">${ICONS.starFilled}</div>
+          <div class="stat-value">${formatMoney(data.totalInvestimentos)}</div>
+          <div class="stat-label">Investimentos</div>
         </div>
         <div class="stat-card tone-success">
           <div class="stat-icon">${ICONS.box}</div>
@@ -3167,7 +3317,9 @@
       <div class="panel" style="margin-bottom:26px;">
         <h3>${ICONS.calc} Resumo · ${FINANCEIRO_PERIODO_LABELS[currentFinanceiroPeriodo]}</h3>
         ${!data.temDados ? `<p class="confirm-text">Sem dados no período.</p>` : `
-          <div class="mini-row"><span class="name">Total gasto em compras</span><span class="value">${formatMoney(data.totalGastoCompras)}</span></div>
+          <div class="mini-row"><span class="name">Gastos operacionais</span><span class="value">${formatMoney(data.totalGastoCompras)}</span></div>
+          <div class="mini-row"><span class="name">Investimentos e equipamentos</span><span class="value">${formatMoney(data.totalInvestimentos)}</span></div>
+          <div class="mini-row"><span class="name">Desembolso total</span><span class="value">${formatMoney(data.desembolsoTotal)}</span></div>
           <div class="mini-row"><span class="name">Ingredientes</span><span class="value">${formatMoney(data.totalGastoIngredientes)}</span></div>
           <div class="mini-row"><span class="name">Suprimentos</span><span class="value">${formatMoney(data.totalGastoSuprimentos)}</span></div>
           ${Object.entries(data.gastosSuprimentosPorCategoria).sort((a, b) => b[1] - a[1]).map(([categoria, valor]) => `<div class="mini-row"><span class="name">↳ ${escapeHtml(categoria)}</span><span class="value">${formatMoney(valor)}</span></div>`).join('')}
@@ -3367,6 +3519,21 @@
       case 'estoque-tab':
         currentEstoqueTab = el.dataset.tab || 'controlados';
         renderEstoque();
+        break;
+      case 'novo-investimento':
+        openInvestmentModal(null);
+        break;
+      case 'editar-investimento':
+        openInvestmentModal(id);
+        break;
+      case 'excluir-investimento':
+        openConfirm({
+          title: 'Excluir investimento',
+          message: 'Deseja excluir este investimento do histórico financeiro?',
+          confirmLabel: 'Excluir',
+          danger: true,
+          onConfirm: () => { deleteInvestment(id); renderAll(); toast('Investimento excluído.', 'success'); },
+        });
         break;
       case 'novo-material':
         openMaterialModal();
