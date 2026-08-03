@@ -1427,6 +1427,23 @@
     getMaterials().push(material); saveDB(); return material;
   }
 
+  function updateMaterial(id, data) {
+    const material = getMaterial(id);
+    if (!material) return { ok: false, message: 'Suprimento não encontrado.' };
+    const novaUnidade = (data.unidade || 'un').trim();
+    const possuiHistorico = getMaterialPurchases().some((p) => p.materialId === id) || getMaterialMovements().some((m) => m.materialId === id);
+    if (possuiHistorico && novaUnidade !== material.unidade) {
+      return { ok: false, message: 'Não é possível alterar a unidade de um suprimento que já possui compras ou baixas registradas.' };
+    }
+    material.nome = data.nome.trim();
+    material.categoria = data.categoria || 'Embalagens';
+    material.unidade = novaUnidade;
+    material.estoqueMinimo = Number(data.estoqueMinimo) || 0;
+    material.observacao = data.observacao || '';
+    saveDB();
+    return { ok: true };
+  }
+
   function addMaterialPurchase(materialId, data) {
     const quantidade = Number(data.quantidade) || 0;
     const valorTotal = Number(data.valorTotal) || 0;
@@ -1451,30 +1468,37 @@
     saveDB();
   }
 
-  function openMaterialModal() {
+  function openMaterialModal(id) {
+    const editing = Boolean(id);
+    const material = editing ? getMaterial(id) : null;
+    if (editing && !material) return;
+    const categoriaAtual = material ? (material.categoria || 'Embalagens') : 'Confeitos';
+    const option = (value) => `<option value="${value}" ${categoriaAtual === value ? 'selected' : ''}>${value}</option>`;
     openModal({
-      title: 'Novo suprimento',
+      title: editing ? 'Editar suprimento' : 'Novo suprimento',
       bodyHTML: `<div class="form-grid">
-        <div class="field span-2"><label>Nome</label><input id="matNome" placeholder="Ex.: Granulado, caixa para 4 doces..."></div>
+        <div class="field span-2"><label>Nome</label><input id="matNome" value="${material ? escapeHtml(material.nome) : ''}" placeholder="Ex.: Granulado, caixa para 4 doces..."></div>
         <div class="field"><label>Categoria</label>
           <select id="matCategoria">
-            <option value="Confeitos">Confeitos</option>
-            <option value="Embalagens">Embalagens</option>
-            <option value="Descartáveis">Descartáveis</option>
-            <option value="Limpeza">Limpeza</option>
-            <option value="Outros">Outros</option>
+            ${option('Confeitos')}
+            ${option('Embalagens')}
+            ${option('Descartáveis')}
+            ${option('Limpeza')}
+            ${option('Outros')}
           </select>
         </div>
-        <div class="field"><label>Unidade</label><input id="matUnidade" value="g" placeholder="g, kg, un, caixa, rolo..."></div>
-        <div class="field"><label>Estoque mínimo</label><input type="number" min="0" step="any" id="matMinimo" value="0"></div>
-        <div class="field span-2"><label>Observação</label><input id="matObs" placeholder="Opcional"></div>
+        <div class="field"><label>Unidade</label><input id="matUnidade" value="${material ? escapeHtml(material.unidade) : 'g'}" placeholder="g, kg, un, caixa, rolo..."></div>
+        <div class="field"><label>Estoque mínimo</label><input type="number" min="0" step="any" id="matMinimo" value="${material ? Number(material.estoqueMinimo) || 0 : 0}"></div>
+        <div class="field span-2"><label>Observação</label><input id="matObs" value="${material ? escapeHtml(material.observacao || '') : ''}" placeholder="Opcional"></div>
       </div>`,
-      footerHTML: `<button class="btn btn-ghost" data-action="fechar-modal">Cancelar</button><button class="btn btn-primary" id="salvarMaterialBtn">Salvar</button>`,
+      footerHTML: `<button class="btn btn-ghost" data-action="fechar-modal">Cancelar</button><button class="btn btn-primary" id="salvarMaterialBtn">${editing ? 'Salvar alterações' : 'Salvar'}</button>`,
       onMount: () => document.getElementById('salvarMaterialBtn').addEventListener('click', () => {
         const nome = document.getElementById('matNome').value.trim();
         if (!nome) { toast('Informe o nome do material.', 'danger'); return; }
-        addMaterial({ nome, categoria: document.getElementById('matCategoria').value, unidade: document.getElementById('matUnidade').value, estoqueMinimo: document.getElementById('matMinimo').value, observacao: document.getElementById('matObs').value });
-        closeModal(); renderAll(); toast('Suprimento cadastrado.', 'success');
+        const data = { nome, categoria: document.getElementById('matCategoria').value, unidade: document.getElementById('matUnidade').value, estoqueMinimo: document.getElementById('matMinimo').value, observacao: document.getElementById('matObs').value };
+        const result = editing ? updateMaterial(id, data) : { ok: true, material: addMaterial(data) };
+        if (!result.ok) { toast(result.message, 'danger'); return; }
+        closeModal(); renderAll(); toast(editing ? 'Suprimento atualizado.' : 'Suprimento cadastrado.', 'success');
       }),
     });
   }
@@ -1902,6 +1926,7 @@
               <div class="ing-meta"><span>${movimentos.length} baixa${movimentos.length === 1 ? '' : 's'} registrada${movimentos.length === 1 ? '' : 's'}</span></div>
               ${m.observacao ? `<p class="confirm-text">${escapeHtml(m.observacao)}</p>` : ''}
               <div class="ing-actions">
+                <button class="btn btn-sm" data-action="editar-material" data-id="${m.id}">${ICONS.edit} Editar</button>
                 <button class="btn btn-sm" data-action="comprar-material" data-id="${m.id}">${ICONS.cart} Comprar</button>
                 <button class="btn btn-sm" data-action="usar-material" data-id="${m.id}">${ICONS.move} Dar baixa</button>
                 <button class="btn btn-sm btn-danger" data-action="excluir-material" data-id="${m.id}">${ICONS.trash}</button>
@@ -3641,6 +3666,9 @@
         break;
       case 'novo-material':
         openMaterialModal();
+        break;
+      case 'editar-material':
+        openMaterialModal(id);
         break;
       case 'comprar-material':
         openMaterialPurchaseModal(id);
