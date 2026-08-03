@@ -70,7 +70,7 @@
       productions: [],
       movements: [],
       calculations: [],
-      settings: { multiplicador: 3, caixasMistas: [], materiais: [], comprasMateriais: [], movimentosMateriais: [], investimentos: [], movimentosProdutosProntos: [] },
+      settings: { multiplicador: 3, saldoInicial: 0, caixasMistas: [], materiais: [], comprasMateriais: [], movimentosMateriais: [], investimentos: [], movimentosProdutosProntos: [] },
     };
   }
 
@@ -114,7 +114,7 @@
     tabelaResults.forEach((r) => { if (r.error) throw r.error; });
     const settingsRes = await sb.from('user_settings').select('payload').eq('user_id', userId).maybeSingle();
     if (settingsRes.error) throw settingsRes.error;
-    const loaded = { settings: (settingsRes.data && settingsRes.data.payload) ? settingsRes.data.payload : { multiplicador: 3, caixasMistas: [], materiais: [], comprasMateriais: [], movimentosMateriais: [], investimentos: [], movimentosProdutosProntos: [] } };
+    const loaded = { settings: (settingsRes.data && settingsRes.data.payload) ? settingsRes.data.payload : { multiplicador: 3, saldoInicial: 0, caixasMistas: [], materiais: [], comprasMateriais: [], movimentosMateriais: [], investimentos: [], movimentosProdutosProntos: [] } };
     TABELAS.forEach((t, i) => { loaded[t] = (tabelaResults[i].data || []).map((r) => r.payload); });
     return Object.assign(defaultDB(), loaded);
   }
@@ -753,7 +753,8 @@
   //     nunca um número inventado.
   function migrateProductions() {
     let changed = false;
-    if (!db.settings) { db.settings = { multiplicador: 3, caixasMistas: [], materiais: [], comprasMateriais: [], movimentosMateriais: [], investimentos: [], movimentosProdutosProntos: [] }; changed = true; }
+    if (!db.settings) { db.settings = { multiplicador: 3, saldoInicial: 0, caixasMistas: [], materiais: [], comprasMateriais: [], movimentosMateriais: [], investimentos: [], movimentosProdutosProntos: [] }; changed = true; }
+    if (typeof db.settings.saldoInicial !== 'number') { db.settings.saldoInicial = Number(db.settings.saldoInicial) || 0; changed = true; }
     if (!Array.isArray(db.settings.caixasMistas)) { db.settings.caixasMistas = []; changed = true; }
     if (!Array.isArray(db.settings.movimentosProdutosProntos)) { db.settings.movimentosProdutosProntos = []; changed = true; }
     if (!Array.isArray(db.settings.materiais)) { db.settings.materiais = []; changed = true; }
@@ -3223,6 +3224,7 @@
     const totalGastoSuprimentos = comprasMateriaisNoPeriodo.reduce((s, p) => s + (Number(p.valorTotal) || 0), 0);
 
     const lucroTotal = faturamentoTotal - custoVendasTotal;
+    const resultadoCaixaPeriodo = faturamentoTotal - desembolsoTotal;
     const numeroVendas = producoesComVenda.length + caixasComVenda.length;
     const ticketMedio = numeroVendas > 0 ? faturamentoTotal / numeroVendas : 0;
 
@@ -3239,7 +3241,7 @@
     });
 
     return {
-      totalGastoCompras, totalGastoIngredientes, totalGastoSuprimentos, totalInvestimentos, desembolsoTotal, gastosSuprimentosPorCategoria, faturamentoTotal, custoVendasTotal, lucroTotal, quantidadeVendidaTotal,
+      totalGastoCompras, totalGastoIngredientes, totalGastoSuprimentos, totalInvestimentos, desembolsoTotal, gastosSuprimentosPorCategoria, faturamentoTotal, custoVendasTotal, lucroTotal, resultadoCaixaPeriodo, quantidadeVendidaTotal,
       quantidadeProduzidaTotal, numeroProducoes, ticketMedio, receitaMaisProduzida, ingredienteMaisGasto,
       temDados: numeroProducoes > 0 || comprasNoPeriodo.length > 0 || comprasMateriaisNoPeriodo.length > 0 || investimentosNoPeriodo.length > 0 || getMixedBoxes().length > 0,
       producoesListadas: [...producoesPorData].sort((a, b) => b.criadoEm - a.criadoEm),
@@ -3249,6 +3251,9 @@
   function renderFinanceiro() {
     const container = document.getElementById('financeiroContainer');
     const data = getFinanceiroData(currentFinanceiroPeriodo, financeiroPeriodoCustomFrom, financeiroPeriodoCustomTo);
+    const dadosGerais = getFinanceiroData('personalizado', '', '');
+    const saldoInicial = Number(db.settings.saldoInicial) || 0;
+    const saldoAtualEstimado = saldoInicial + dadosGerais.faturamentoTotal - dadosGerais.desembolsoTotal;
 
     container.innerHTML = `
       <div class="calc-tabs" id="financeiroPeriodoTabs">
@@ -3267,7 +3272,28 @@
         </div>
       ` : ''}
 
+      <div class="panel" style="margin-bottom:18px;">
+        <div style="display:flex; gap:14px; align-items:end; flex-wrap:wrap;">
+          <div class="field" style="min-width:220px; flex:1;">
+            <label>Saldo inicial do caixa</label>
+            <input type="number" min="0" step="0.01" id="saldoInicialCaixaInput" value="${saldoInicial}">
+          </div>
+          <button type="button" class="btn btn-primary" id="salvarSaldoInicialBtn">Salvar saldo inicial</button>
+          <p class="confirm-text" style="margin:0; flex-basis:100%;">Use o valor que já existia no caixa antes dos registros do sistema.</p>
+        </div>
+      </div>
+
       <div class="dash-grid" style="margin-bottom:22px;">
+        <div class="stat-card tone-success">
+          <div class="stat-icon">${ICONS.calc}</div>
+          <div class="stat-value">${formatMoney(saldoAtualEstimado)}</div>
+          <div class="stat-label">Saldo atual estimado</div>
+        </div>
+        <div class="stat-card ${data.resultadoCaixaPeriodo >= 0 ? 'tone-success' : 'tone-warn'}">
+          <div class="stat-icon">${ICONS.starFilled}</div>
+          <div class="stat-value">${formatMoney(data.resultadoCaixaPeriodo)}</div>
+          <div class="stat-label">Resultado do período</div>
+        </div>
         <div class="stat-card tone-warn">
           <div class="stat-icon">${ICONS.cart}</div>
           <div class="stat-value">${formatMoney(data.totalGastoCompras)}</div>
@@ -3318,6 +3344,9 @@
       <div class="panel" style="margin-bottom:26px;">
         <h3>${ICONS.calc} Resumo · ${FINANCEIRO_PERIODO_LABELS[currentFinanceiroPeriodo]}</h3>
         ${!data.temDados ? `<p class="confirm-text">Sem dados no período.</p>` : `
+          <div class="mini-row"><span class="name">Saldo inicial cadastrado</span><span class="value">${formatMoney(saldoInicial)}</span></div>
+          <div class="mini-row"><span class="name">Saldo atual estimado</span><span class="value">${formatMoney(saldoAtualEstimado)}</span></div>
+          <div class="mini-row"><span class="name">Resultado de caixa do período</span><span class="value">${formatMoney(data.resultadoCaixaPeriodo)}</span></div>
           <div class="mini-row"><span class="name">Gastos operacionais</span><span class="value">${formatMoney(data.totalGastoCompras)}</span></div>
           <div class="mini-row"><span class="name">Investimentos e equipamentos</span><span class="value">${formatMoney(data.totalInvestimentos)}</span></div>
           <div class="mini-row"><span class="name">Desembolso total</span><span class="value">${formatMoney(data.desembolsoTotal)}</span></div>
@@ -3338,6 +3367,18 @@
       <h2 class="section-title" style="margin-top:0;">Produções no período</h2>
       <div class="producoes-list" id="financeiroProducoesList"></div>
     `;
+
+    document.getElementById('salvarSaldoInicialBtn').addEventListener('click', () => {
+      const valor = Number(document.getElementById('saldoInicialCaixaInput').value);
+      if (!Number.isFinite(valor) || valor < 0) {
+        toast('Informe um saldo inicial válido.', 'danger');
+        return;
+      }
+      db.settings.saldoInicial = valor;
+      saveDB();
+      renderFinanceiro();
+      toast('Saldo inicial atualizado.', 'success');
+    });
 
     if (currentFinanceiroPeriodo === 'personalizado') {
       const applyRange = () => {
