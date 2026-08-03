@@ -473,6 +473,8 @@
       quantidadeRestanteBase: quantidadeBase,
       valorTotal,
       valorUnitario,
+      considerarFinanceiro: data.considerarFinanceiro !== false,
+      origem: data.origem || (data.considerarFinanceiro === false ? 'Estoque inicial' : 'Compra'),
       validade: data.validade || '',
       dataCompra: data.dataCompra || todayISO(),
       criadoEm: Date.now(),
@@ -511,6 +513,8 @@
     p.quantidadeRestanteBase = quantidadeBase - consumedBase;
     p.valorTotal = valorTotal;
     p.valorUnitario = quantidade > 0 ? valorTotal / quantidade : 0;
+    p.considerarFinanceiro = data.considerarFinanceiro !== false;
+    p.origem = data.origem || (p.considerarFinanceiro ? 'Compra' : 'Estoque inicial');
     p.validade = data.validade || '';
     p.dataCompra = data.dataCompra || p.dataCompra;
     saveDB();
@@ -546,6 +550,7 @@
     if (!p) return;
     addPurchase(p.ingredienteId, {
       marca: p.marca, quantidade: p.quantidade, valorTotal: p.valorTotal,
+      considerarFinanceiro: p.considerarFinanceiro !== false, origem: p.origem || 'Compra',
       validade: p.validade, dataCompra: todayISO(),
     });
   }
@@ -761,6 +766,10 @@
     if (!Array.isArray(db.settings.comprasMateriais)) { db.settings.comprasMateriais = []; changed = true; }
     if (!Array.isArray(db.settings.movimentosMateriais)) { db.settings.movimentosMateriais = []; changed = true; }
     if (!Array.isArray(db.settings.investimentos)) { db.settings.investimentos = []; changed = true; }
+    db.purchases.forEach((p) => {
+      if (typeof p.considerarFinanceiro !== 'boolean') { p.considerarFinanceiro = true; changed = true; }
+      if (!p.origem) { p.origem = p.considerarFinanceiro ? 'Compra' : 'Estoque inicial'; changed = true; }
+    });
     db.productions.forEach((p) => {
       if (typeof p.quantidadeReceitas !== 'number') {
         const receita = getRecipe(p.receitaId);
@@ -2029,7 +2038,7 @@
       if (!items.length) { listEl.innerHTML = `<p class="confirm-text">Nenhuma compra registrada ainda.</p>`; return; }
       listEl.innerHTML = items.map((p) => `
         <div class="mini-row">
-          <span class="name">${escapeHtml(p.marca || 'Sem marca')} — ${formatNumber(p.quantidade, 2)} ${ing.unidade} (${formatMoney(p.valorUnitario)}/${ing.unidade}) · ${formatDateBR(p.dataCompra)}</span>
+          <span class="name">${escapeHtml(p.marca || 'Sem marca')} — ${formatNumber(p.quantidade, 2)} ${ing.unidade} (${formatMoney(p.valorUnitario)}/${ing.unidade}) · ${formatDateBR(p.dataCompra)} <span class="badge ${p.considerarFinanceiro === false ? 'badge-muted' : 'badge-ok'}">${p.considerarFinanceiro === false ? escapeHtml(p.origem || 'Não afeta o caixa') : 'Financeiro'}</span></span>
           <span style="display:flex; gap:6px;">
             <button class="btn btn-sm btn-icon" data-action="editar-compra" data-id="${p.id}" data-ing="${ingredienteId}" title="Editar">${ICONS.edit}</button>
             <button class="btn btn-sm btn-icon" data-action="duplicar-compra" data-id="${p.id}" data-ing="${ingredienteId}" title="Duplicar">${ICONS.plus}</button>
@@ -2068,6 +2077,19 @@
             <label>Valor unitário (automático)</label>
             <input type="text" id="pValorUnitario" value="" disabled>
           </div>
+          <div class="field">
+            <label>Origem</label>
+            <select id="pOrigem">
+              ${['Compra','Estoque inicial','Doação','Presente','Outro'].map((o) => `<option value="${o}" ${(editing ? (editing.origem || (editing.considerarFinanceiro === false ? 'Estoque inicial' : 'Compra')) : 'Compra') === o ? 'selected' : ''}>${o}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field span-2">
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+              <input type="checkbox" id="pConsiderarFinanceiro" ${!editing || editing.considerarFinanceiro !== false ? 'checked' : ''}>
+              Considerar esta compra no Financeiro
+            </label>
+            <small class="muted">Desmarque para estoque inicial, doação, presente ou algo que não saiu do seu caixa.</small>
+          </div>
         </div>
         <div class="form-actions" style="margin-top:10px;">
           <button class="btn btn-primary" id="savePurchaseBtn">${editing ? 'Salvar alterações' : 'Adicionar compra'}</button>
@@ -2104,6 +2126,8 @@
             valorTotal: document.getElementById('pValorTotal').value,
             validade: document.getElementById('pValidade').value,
             dataCompra: document.getElementById('pData').value,
+            considerarFinanceiro: document.getElementById('pConsiderarFinanceiro').checked,
+            origem: document.getElementById('pOrigem').value,
           };
           if (!data.quantidade || Number(data.quantidade) <= 0) { toast('Informe uma quantidade válida.', 'danger'); return; }
           if (Number(data.valorTotal) < 0) { toast('O valor total não pode ser negativo.', 'danger'); return; }
@@ -3187,7 +3211,7 @@
   // produzida e número de produções usam a data da PRODUÇÃO (entram todas,
   // vendidas ou não).
   function getFinanceiroData(period, customFrom, customTo) {
-    const comprasNoPeriodo = db.purchases.filter((p) => isDateInPeriod(p.dataCompra, period, customFrom, customTo));
+    const comprasNoPeriodo = db.purchases.filter((p) => p.considerarFinanceiro !== false && isDateInPeriod(p.dataCompra, period, customFrom, customTo));
     const comprasMateriaisNoPeriodo = getMaterialPurchases().filter((p) => isDateInPeriod(p.dataCompra, period, customFrom, customTo));
     const investimentosNoPeriodo = getInvestments().filter((x) => isDateInPeriod(x.dataCompra, period, customFrom, customTo));
     const totalGastoCompras = comprasNoPeriodo.reduce((s, p) => s + (Number(p.valorTotal) || 0), 0)
