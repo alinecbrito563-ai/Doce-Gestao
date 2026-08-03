@@ -3260,9 +3260,10 @@
         <button class="calc-tab ${currentFinanceiroPeriodo === 'personalizado' ? 'active' : ''}" data-action="financeiro-periodo" data-periodo="personalizado">Personalizado</button>
       </div>
       ${currentFinanceiroPeriodo === 'personalizado' ? `
-        <div class="form-grid cols-3" style="margin-bottom:16px;">
+        <div class="form-grid cols-3" style="margin-bottom:16px; align-items:end;">
           <div class="field"><label>De</label><input type="date" id="financeiroPeriodoDe" value="${financeiroPeriodoCustomFrom}"></div>
           <div class="field"><label>Até</label><input type="date" id="financeiroPeriodoAte" value="${financeiroPeriodoCustomTo}"></div>
+          <div class="field"><button type="button" class="btn btn-primary" id="aplicarFinanceiroPeriodoBtn">Aplicar período</button></div>
         </div>
       ` : ''}
 
@@ -3340,12 +3341,31 @@
 
     if (currentFinanceiroPeriodo === 'personalizado') {
       const applyRange = () => {
-        financeiroPeriodoCustomFrom = document.getElementById('financeiroPeriodoDe').value;
-        financeiroPeriodoCustomTo = document.getElementById('financeiroPeriodoAte').value;
+        const fromInput = document.getElementById('financeiroPeriodoDe');
+        const toInput = document.getElementById('financeiroPeriodoAte');
+        const from = fromInput.value;
+        const to = toInput.value;
+
+        if (!from || !to) {
+          toast('Preencha as duas datas para aplicar o período.', 'warning');
+          return;
+        }
+        if (from > to) {
+          toast('A data inicial não pode ser posterior à data final.', 'danger');
+          return;
+        }
+
+        financeiroPeriodoCustomFrom = from;
+        financeiroPeriodoCustomTo = to;
         renderFinanceiro();
       };
-      document.getElementById('financeiroPeriodoDe').addEventListener('change', applyRange);
-      document.getElementById('financeiroPeriodoAte').addEventListener('change', applyRange);
+
+      document.getElementById('aplicarFinanceiroPeriodoBtn').addEventListener('click', applyRange);
+      ['financeiroPeriodoDe', 'financeiroPeriodoAte'].forEach((id) => {
+        document.getElementById(id).addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') applyRange();
+        });
+      });
     }
 
     const list = document.getElementById('financeiroProducoesList');
