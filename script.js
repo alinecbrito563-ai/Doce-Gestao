@@ -498,9 +498,12 @@
     const consumedBase = p.quantidadeBase - p.quantidadeRestanteBase;
     const quantidade = Number(data.quantidade) || 0;
     const quantidadeBase = toBase(quantidade, ing.unidade);
-    // Nunca permitir reduzir um lote para menos do que já foi consumido dele —
-    // isso deixaria o histórico de consumo (FIFO) inconsistente com a realidade.
-    if (quantidadeBase < consumedBase - EPS) {
+    const quantidadeFoiAlterada = Math.abs(quantidadeBase - p.quantidadeBase) > EPS;
+
+    // Ao editar apenas a origem/participação no Financeiro, preserva exatamente
+    // o lote já registrado. Isso evita bloquear compras antigas que já tiveram
+    // consumo e possuem pequenas inconsistências históricas de conversão.
+    if (quantidadeFoiAlterada && quantidadeBase < consumedBase - EPS) {
       return {
         ok: false,
         message: `Não é possível reduzir esta compra para menos do que já foi consumido deste lote (${formatQuantityBase(consumedBase, ing.unidade)} já utilizados).`,
@@ -509,8 +512,10 @@
     const valorTotal = Number(data.valorTotal) || 0;
     p.marca = data.marca || '';
     p.quantidade = quantidade;
-    p.quantidadeBase = quantidadeBase;
-    p.quantidadeRestanteBase = quantidadeBase - consumedBase;
+    if (quantidadeFoiAlterada) {
+      p.quantidadeBase = quantidadeBase;
+      p.quantidadeRestanteBase = quantidadeBase - consumedBase;
+    }
     p.valorTotal = valorTotal;
     p.valorUnitario = quantidade > 0 ? valorTotal / quantidade : 0;
     p.considerarFinanceiro = data.considerarFinanceiro !== false;
