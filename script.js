@@ -496,20 +496,29 @@
     if (!p) return { ok: false, message: 'Compra não encontrada.' };
     const ing = getIngredient(p.ingredienteId);
     const consumedBase = p.quantidadeBase - p.quantidadeRestanteBase;
-    const quantidade = Number(data.quantidade) || 0;
+
+    // Algumas compras antigas podem ter `quantidade` zerada/inconsistente, embora
+    // `quantidadeBase` esteja correta. Nesses casos, recupera a quantidade real
+    // do lote antes de comparar qualquer alteração.
+    const quantidadeOriginal = Number(p.quantidade) > 0
+      ? Number(p.quantidade)
+      : fromBase(p.quantidadeBase, ing.unidade);
+    const quantidadeInformada = Number(data.quantidade);
+    const quantidade = Number.isFinite(quantidadeInformada) && quantidadeInformada > 0
+      ? quantidadeInformada
+      : quantidadeOriginal;
     const quantidadeBase = toBase(quantidade, ing.unidade);
     const quantidadeFoiAlterada = Math.abs(quantidadeBase - p.quantidadeBase) > EPS;
 
-    // Ao editar apenas a origem/participação no Financeiro, preserva exatamente
-    // o lote já registrado. Isso evita bloquear compras antigas que já tiveram
-    // consumo e possuem pequenas inconsistências históricas de conversão.
     if (quantidadeFoiAlterada && quantidadeBase < consumedBase - EPS) {
       return {
         ok: false,
         message: `Não é possível reduzir esta compra para menos do que já foi consumido deste lote (${formatQuantityBase(consumedBase, ing.unidade)} já utilizados).`,
       };
     }
-    const valorTotal = Number(data.valorTotal) || 0;
+
+    const valorTotalInformado = Number(data.valorTotal);
+    const valorTotal = Number.isFinite(valorTotalInformado) ? valorTotalInformado : (Number(p.valorTotal) || 0);
     p.marca = data.marca || '';
     p.quantidade = quantidade;
     if (quantidadeFoiAlterada) {
@@ -2035,6 +2044,9 @@
   function openPurchaseModal(ingredienteId, purchaseId) {
     const ing = getIngredient(ingredienteId);
     const editing = purchaseId ? db.purchases.find((p) => p.id === purchaseId) : null;
+    const editingQuantidade = editing
+      ? (Number(editing.quantidade) > 0 ? Number(editing.quantidade) : fromBase(editing.quantidadeBase, ing.unidade))
+      : '';
 
     function renderList() {
       const items = getPurchasesFor(ingredienteId).slice().reverse();
@@ -2064,7 +2076,7 @@
           </div>
           <div class="field">
             <label>Quantidade (${ing.unidade})</label>
-            <input type="number" min="0" step="any" id="pQuantidade" value="${editing ? editing.quantidade : ''}" placeholder="0">
+            <input type="number" min="0" step="any" id="pQuantidade" value="${editing ? editingQuantidade : ''}" placeholder="0">
           </div>
           <div class="field">
             <label>Valor total pago (R$)</label>
@@ -2134,7 +2146,7 @@
             considerarFinanceiro: document.getElementById('pConsiderarFinanceiro').checked,
             origem: document.getElementById('pOrigem').value,
           };
-          if (!data.quantidade || Number(data.quantidade) <= 0) { toast('Informe uma quantidade válida.', 'danger'); return; }
+          if ((!editing && (!data.quantidade || Number(data.quantidade) <= 0))) { toast('Informe uma quantidade válida.', 'danger'); return; }
           if (Number(data.valorTotal) < 0) { toast('O valor total não pode ser negativo.', 'danger'); return; }
           if (editing) {
             const result = updatePurchase(editing.id, data);
