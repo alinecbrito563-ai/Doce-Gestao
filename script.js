@@ -241,6 +241,19 @@
     return v.toLocaleString('pt-BR', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
   }
 
+
+  // Leitura robusta de campos numéricos em desktop e celular.
+  // Alguns teclados móveis exibem vírgula decimal; valueAsNumber nem sempre
+  // acompanha corretamente o valor visível. Esta função tenta as duas formas.
+  function readNumberInput(id) {
+    const input = document.getElementById(id);
+    if (!input) return NaN;
+    if (Number.isFinite(input.valueAsNumber)) return input.valueAsNumber;
+    const raw = String(input.value || '').trim().replace(/\s/g, '').replace(',', '.');
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) ? parsed : NaN;
+  }
+
   function familyOf(unit) { return UNIT_FAMILY[unit]; }
   function compatibleUnitsFor(unit) { return COMPATIBLE_UNITS[familyOf(unit)] || ['unidade']; }
   function toBase(qty, unit) { return (Number(qty) || 0) * (UNIT_BASE_FACTOR[unit] || 1); }
@@ -1568,8 +1581,8 @@
         });
         document.getElementById('salvarCompraMaterialBtn').addEventListener('click', () => {
           const data = {
-            quantidade: document.getElementById('matCompraQtd').value,
-            valorTotal: document.getElementById('matCompraValor').value,
+            quantidade: readNumberInput('matCompraQtd'),
+            valorTotal: readNumberInput('matCompraValor'),
             dataCompra: document.getElementById('matCompraData').value,
             origem: origem.value,
             considerarFinanceiro: financeiro.checked,
@@ -2239,17 +2252,19 @@
         setTimeout(recalc, 0);
         renderList();
         document.getElementById('savePurchaseBtn').addEventListener('click', () => {
+          // Lê os números diretamente dos inputs no momento do toque/clique.
+          // Isso evita que o Android salve apenas a data e ignore quantidade/valor.
           const data = {
             marca: document.getElementById('pMarca').value,
-            quantidade: document.getElementById('pQuantidade').value,
-            valorTotal: document.getElementById('pValorTotal').value,
+            quantidade: readNumberInput('pQuantidade'),
+            valorTotal: readNumberInput('pValorTotal'),
             validade: document.getElementById('pValidade').value,
             dataCompra: document.getElementById('pData').value,
             considerarFinanceiro: document.getElementById('pConsiderarFinanceiro').checked,
             origem: document.getElementById('pOrigem').value,
           };
-          if ((!editing && (!data.quantidade || Number(data.quantidade) <= 0))) { toast('Informe uma quantidade válida.', 'danger'); return; }
-          if (Number(data.valorTotal) < 0) { toast('O valor total não pode ser negativo.', 'danger'); return; }
+          if (!Number.isFinite(data.quantidade) || data.quantidade <= 0) { toast('Informe uma quantidade válida.', 'danger'); return; }
+          if (!Number.isFinite(data.valorTotal) || data.valorTotal < 0) { toast('Informe um valor total válido.', 'danger'); return; }
           if (editing) {
             const result = updatePurchase(editing.id, data);
             if (!result.ok) { toast(result.message, 'danger'); return; }
