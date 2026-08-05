@@ -70,7 +70,7 @@
       productions: [],
       movements: [],
       calculations: [],
-      settings: { multiplicador: 3, saldoInicial: 0, caixasMistas: [], materiais: [], comprasMateriais: [], movimentosMateriais: [], investimentos: [], movimentosProdutosProntos: [] },
+      settings: { multiplicador: 3, saldoInicial: 0, caixasMistas: [], materiais: [], comprasMateriais: [], movimentosMateriais: [], investimentos: [], saidasManuais: [], movimentosProdutosProntos: [] },
     };
   }
 
@@ -114,7 +114,7 @@
     tabelaResults.forEach((r) => { if (r.error) throw r.error; });
     const settingsRes = await sb.from('user_settings').select('payload').eq('user_id', userId).maybeSingle();
     if (settingsRes.error) throw settingsRes.error;
-    const loaded = { settings: (settingsRes.data && settingsRes.data.payload) ? settingsRes.data.payload : { multiplicador: 3, saldoInicial: 0, caixasMistas: [], materiais: [], comprasMateriais: [], movimentosMateriais: [], investimentos: [], movimentosProdutosProntos: [] } };
+    const loaded = { settings: (settingsRes.data && settingsRes.data.payload) ? settingsRes.data.payload : { multiplicador: 3, saldoInicial: 0, caixasMistas: [], materiais: [], comprasMateriais: [], movimentosMateriais: [], investimentos: [], saidasManuais: [], movimentosProdutosProntos: [] } };
     TABELAS.forEach((t, i) => { loaded[t] = (tabelaResults[i].data || []).map((r) => r.payload); });
     return Object.assign(defaultDB(), loaded);
   }
@@ -239,19 +239,6 @@
   function formatNumber(v, decimals) {
     v = Number(v) || 0;
     return v.toLocaleString('pt-BR', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
-  }
-
-
-  // Leitura robusta de campos numéricos em desktop e celular.
-  // Alguns teclados móveis exibem vírgula decimal; valueAsNumber nem sempre
-  // acompanha corretamente o valor visível. Esta função tenta as duas formas.
-  function readNumberInput(id) {
-    const input = document.getElementById(id);
-    if (!input) return NaN;
-    if (Number.isFinite(input.valueAsNumber)) return input.valueAsNumber;
-    const raw = String(input.value || '').trim().replace(/\s/g, '').replace(',', '.');
-    const parsed = Number(raw);
-    return Number.isFinite(parsed) ? parsed : NaN;
   }
 
   function familyOf(unit) { return UNIT_FAMILY[unit]; }
@@ -785,7 +772,7 @@
   //     nunca um número inventado.
   function migrateProductions() {
     let changed = false;
-    if (!db.settings) { db.settings = { multiplicador: 3, saldoInicial: 0, caixasMistas: [], materiais: [], comprasMateriais: [], movimentosMateriais: [], investimentos: [], movimentosProdutosProntos: [] }; changed = true; }
+    if (!db.settings) { db.settings = { multiplicador: 3, saldoInicial: 0, caixasMistas: [], materiais: [], comprasMateriais: [], movimentosMateriais: [], investimentos: [], saidasManuais: [], movimentosProdutosProntos: [] }; changed = true; }
     if (typeof db.settings.saldoInicial !== 'number') { db.settings.saldoInicial = Number(db.settings.saldoInicial) || 0; changed = true; }
     if (!Array.isArray(db.settings.caixasMistas)) { db.settings.caixasMistas = []; changed = true; }
     if (!Array.isArray(db.settings.movimentosProdutosProntos)) { db.settings.movimentosProdutosProntos = []; changed = true; }
@@ -793,6 +780,7 @@
     if (!Array.isArray(db.settings.comprasMateriais)) { db.settings.comprasMateriais = []; changed = true; }
     if (!Array.isArray(db.settings.movimentosMateriais)) { db.settings.movimentosMateriais = []; changed = true; }
     if (!Array.isArray(db.settings.investimentos)) { db.settings.investimentos = []; changed = true; }
+    if (!Array.isArray(db.settings.saidasManuais)) { db.settings.saidasManuais = []; changed = true; }
     db.purchases.forEach((p) => {
       if (typeof p.considerarFinanceiro !== 'boolean') { p.considerarFinanceiro = true; changed = true; }
       if (!p.origem) { p.origem = p.considerarFinanceiro ? 'Compra' : 'Estoque inicial'; changed = true; }
@@ -1581,8 +1569,8 @@
         });
         document.getElementById('salvarCompraMaterialBtn').addEventListener('click', () => {
           const data = {
-            quantidade: readNumberInput('matCompraQtd'),
-            valorTotal: readNumberInput('matCompraValor'),
+            quantidade: document.getElementById('matCompraQtd').value,
+            valorTotal: document.getElementById('matCompraValor').value,
             dataCompra: document.getElementById('matCompraData').value,
             origem: origem.value,
             considerarFinanceiro: financeiro.checked,
@@ -2252,19 +2240,17 @@
         setTimeout(recalc, 0);
         renderList();
         document.getElementById('savePurchaseBtn').addEventListener('click', () => {
-          // Lê os números diretamente dos inputs no momento do toque/clique.
-          // Isso evita que o Android salve apenas a data e ignore quantidade/valor.
           const data = {
             marca: document.getElementById('pMarca').value,
-            quantidade: readNumberInput('pQuantidade'),
-            valorTotal: readNumberInput('pValorTotal'),
+            quantidade: document.getElementById('pQuantidade').value,
+            valorTotal: document.getElementById('pValorTotal').value,
             validade: document.getElementById('pValidade').value,
             dataCompra: document.getElementById('pData').value,
             considerarFinanceiro: document.getElementById('pConsiderarFinanceiro').checked,
             origem: document.getElementById('pOrigem').value,
           };
-          if (!Number.isFinite(data.quantidade) || data.quantidade <= 0) { toast('Informe uma quantidade válida.', 'danger'); return; }
-          if (!Number.isFinite(data.valorTotal) || data.valorTotal < 0) { toast('Informe um valor total válido.', 'danger'); return; }
+          if ((!editing && (!data.quantidade || Number(data.quantidade) <= 0))) { toast('Informe uma quantidade válida.', 'danger'); return; }
+          if (Number(data.valorTotal) < 0) { toast('O valor total não pode ser negativo.', 'danger'); return; }
           if (editing) {
             const result = updatePurchase(editing.id, data);
             if (!result.ok) { toast(result.message, 'danger'); return; }
@@ -3333,6 +3319,67 @@
 
   const FINANCEIRO_PERIODO_LABELS = { hoje: 'Hoje', semana: 'Esta semana', mes: 'Este mês', mesAnterior: 'Mês anterior', ano: 'Este ano', personalizado: 'Personalizado' };
 
+  function getManualExits() {
+    if (!db.settings) db.settings = {};
+    if (!Array.isArray(db.settings.saidasManuais)) db.settings.saidasManuais = [];
+    return db.settings.saidasManuais;
+  }
+
+  function saveManualExit(id, data) {
+    const valor = Number(String(data.valor || '').replace(',', '.'));
+    const motivo = String(data.motivo || '').trim();
+    if (!motivo) return { ok: false, message: 'Informe o motivo da saída.' };
+    if (!Number.isFinite(valor) || valor <= 0) return { ok: false, message: 'Informe um valor válido.' };
+    const existing = id ? getManualExits().find((x) => x.id === id) : null;
+    if (id && !existing) return { ok: false, message: 'Saída não encontrada.' };
+    const target = existing || { id: uid(), criadoEm: Date.now() };
+    target.motivo = motivo;
+    target.valor = valor;
+    target.data = data.data || todayISO();
+    target.categoria = data.categoria || 'Outros';
+    target.observacao = String(data.observacao || '').trim();
+    if (!existing) getManualExits().push(target);
+    saveDB();
+    return { ok: true };
+  }
+
+  function deleteManualExit(id) {
+    db.settings.saidasManuais = getManualExits().filter((x) => x.id !== id);
+    saveDB();
+  }
+
+  function openManualExitModal(id) {
+    const editing = Boolean(id);
+    const item = editing ? getManualExits().find((x) => x.id === id) : null;
+    if (editing && !item) return;
+    const categoriaAtual = item ? (item.categoria || 'Outros') : 'Reposição';
+    const option = (v) => `<option value="${v}" ${categoriaAtual === v ? 'selected' : ''}>${v}</option>`;
+    openModal({
+      title: editing ? 'Editar saída manual' : 'Registrar saída manual',
+      bodyHTML: `<div class="form-grid">
+        <div class="field span-2"><label>Motivo</label><input id="saidaManualMotivo" value="${item ? escapeHtml(item.motivo) : ''}" placeholder="Ex.: Reposição de leite condensado para minha mãe"></div>
+        <div class="field"><label>Valor</label><input type="number" inputmode="decimal" min="0" step="0.01" id="saidaManualValor" value="${item ? Number(item.valor) || 0 : ''}"></div>
+        <div class="field"><label>Data</label><input type="date" id="saidaManualData" value="${item ? item.data : todayISO()}"></div>
+        <div class="field"><label>Categoria</label><select id="saidaManualCategoria">
+          ${option('Reposição')}${option('Retirada pessoal')}${option('Taxas')}${option('Transporte')}${option('Outros')}
+        </select></div>
+        <div class="field span-2"><label>Observação</label><input id="saidaManualObs" value="${item ? escapeHtml(item.observacao || '') : ''}" placeholder="Opcional"></div>
+      </div>`,
+      footerHTML: `<button class="btn btn-ghost" data-action="fechar-modal">Cancelar</button><button class="btn btn-primary" id="salvarSaidaManualBtn">${editing ? 'Salvar alterações' : 'Registrar saída'}</button>`,
+      onMount: () => document.getElementById('salvarSaidaManualBtn').addEventListener('click', () => {
+        const result = saveManualExit(id, {
+          motivo: document.getElementById('saidaManualMotivo').value,
+          valor: document.getElementById('saidaManualValor').value,
+          data: document.getElementById('saidaManualData').value,
+          categoria: document.getElementById('saidaManualCategoria').value,
+          observacao: document.getElementById('saidaManualObs').value,
+        });
+        if (!result.ok) { toast(result.message, 'danger'); return; }
+        closeModal(); renderFinanceiro(); toast(editing ? 'Saída atualizada.' : 'Saída registrada no Financeiro.', 'success');
+      }),
+    });
+  }
+
   function getProductionStatus(production) {
     const produced = Number(production.quantidadeProduzida) || 0;
     const sold = Number(production.quantidadeVendida) || 0;
@@ -3350,10 +3397,12 @@
     const comprasNoPeriodo = db.purchases.filter((p) => p.considerarFinanceiro !== false && isDateInPeriod(p.dataCompra, period, customFrom, customTo));
     const comprasMateriaisNoPeriodo = getMaterialPurchases().filter((p) => p.considerarFinanceiro !== false && isDateInPeriod(p.dataCompra, period, customFrom, customTo));
     const investimentosNoPeriodo = getInvestments().filter((x) => isDateInPeriod(x.dataCompra, period, customFrom, customTo));
+    const saidasManuaisNoPeriodo = getManualExits().filter((x) => isDateInPeriod(x.data, period, customFrom, customTo));
     const totalGastoCompras = comprasNoPeriodo.reduce((s, p) => s + (Number(p.valorTotal) || 0), 0)
       + comprasMateriaisNoPeriodo.reduce((s, p) => s + (Number(p.valorTotal) || 0), 0);
     const totalInvestimentos = investimentosNoPeriodo.reduce((s, x) => s + (Number(x.valor) || 0), 0);
-    const desembolsoTotal = totalGastoCompras + totalInvestimentos;
+    const totalSaidasManuais = saidasManuaisNoPeriodo.reduce((s, x) => s + (Number(x.valor) || 0), 0);
+    const desembolsoTotal = totalGastoCompras + totalInvestimentos + totalSaidasManuais;
 
     const producoesPorData = db.productions.filter((p) => isDateInPeriod(p.data, period, customFrom, customTo));
     const quantidadeProduzidaTotal = producoesPorData.reduce((s, p) => s + (Number(p.quantidadeProduzida) || 0), 0);
@@ -3401,9 +3450,9 @@
     });
 
     return {
-      totalGastoCompras, totalGastoIngredientes, totalGastoSuprimentos, totalInvestimentos, desembolsoTotal, gastosSuprimentosPorCategoria, faturamentoTotal, custoVendasTotal, lucroTotal, resultadoCaixaPeriodo, quantidadeVendidaTotal,
+      totalGastoCompras, totalGastoIngredientes, totalGastoSuprimentos, totalInvestimentos, totalSaidasManuais, saidasManuaisNoPeriodo, desembolsoTotal, gastosSuprimentosPorCategoria, faturamentoTotal, custoVendasTotal, lucroTotal, resultadoCaixaPeriodo, quantidadeVendidaTotal,
       quantidadeProduzidaTotal, numeroProducoes, ticketMedio, receitaMaisProduzida, ingredienteMaisGasto,
-      temDados: numeroProducoes > 0 || comprasNoPeriodo.length > 0 || comprasMateriaisNoPeriodo.length > 0 || investimentosNoPeriodo.length > 0 || getMixedBoxes().length > 0,
+      temDados: numeroProducoes > 0 || comprasNoPeriodo.length > 0 || comprasMateriaisNoPeriodo.length > 0 || investimentosNoPeriodo.length > 0 || saidasManuaisNoPeriodo.length > 0 || getMixedBoxes().length > 0,
       producoesListadas: [...producoesPorData].sort((a, b) => b.criadoEm - a.criadoEm),
     };
   }
@@ -3464,6 +3513,11 @@
           <div class="stat-value">${formatMoney(data.totalInvestimentos)}</div>
           <div class="stat-label">Investimentos</div>
         </div>
+        <div class="stat-card tone-warn">
+          <div class="stat-icon">${ICONS.move}</div>
+          <div class="stat-value">${formatMoney(data.totalSaidasManuais)}</div>
+          <div class="stat-label">Outras saídas</div>
+        </div>
         <div class="stat-card tone-success">
           <div class="stat-icon">${ICONS.box}</div>
           <div class="stat-value">${formatMoney(data.faturamentoTotal)}</div>
@@ -3509,6 +3563,7 @@
           <div class="mini-row"><span class="name">Resultado de caixa do período</span><span class="value">${formatMoney(data.resultadoCaixaPeriodo)}</span></div>
           <div class="mini-row"><span class="name">Gastos operacionais</span><span class="value">${formatMoney(data.totalGastoCompras)}</span></div>
           <div class="mini-row"><span class="name">Investimentos e equipamentos</span><span class="value">${formatMoney(data.totalInvestimentos)}</span></div>
+          <div class="mini-row"><span class="name">Outras saídas manuais</span><span class="value">${formatMoney(data.totalSaidasManuais)}</span></div>
           <div class="mini-row"><span class="name">Desembolso total</span><span class="value">${formatMoney(data.desembolsoTotal)}</span></div>
           <div class="mini-row"><span class="name">Ingredientes</span><span class="value">${formatMoney(data.totalGastoIngredientes)}</span></div>
           <div class="mini-row"><span class="name">Suprimentos</span><span class="value">${formatMoney(data.totalGastoSuprimentos)}</span></div>
@@ -3522,6 +3577,18 @@
           <div class="mini-row"><span class="name">Receita mais produzida</span><span class="value">${data.receitaMaisProduzida ? escapeHtml(data.receitaMaisProduzida) : '—'}</span></div>
           <div class="mini-row"><span class="name">Ingrediente com maior gasto</span><span class="value">${data.ingredienteMaisGasto ? escapeHtml(data.ingredienteMaisGasto) : '—'}</span></div>
         `}
+      </div>
+
+      <div class="panel" style="margin-bottom:26px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px;">
+          <div><h3 style="margin:0;">${ICONS.move} Outras saídas</h3><p class="confirm-text" style="margin:4px 0 0;">Registre valores que saíram do caixa sem movimentar o estoque.</p></div>
+          <button class="btn btn-primary btn-sm" data-action="nova-saida-manual">${ICONS.plus} Registrar saída</button>
+        </div>
+        ${data.saidasManuaisNoPeriodo.length ? data.saidasManuaisNoPeriodo.slice().sort((a,b) => (b.data || '').localeCompare(a.data || '')).map((x) => `
+          <div class="mini-row" style="align-items:center;gap:10px;">
+            <span class="name"><strong>${escapeHtml(x.motivo)}</strong><small>${formatDateBR(x.data)} · ${escapeHtml(x.categoria || 'Outros')}${x.observacao ? ' · ' + escapeHtml(x.observacao) : ''}</small></span>
+            <span style="display:flex;align-items:center;gap:8px;"><span class="value">${formatMoney(x.valor)}</span><button class="btn btn-sm" data-action="editar-saida-manual" data-id="${x.id}">${ICONS.edit}</button><button class="btn btn-sm btn-danger" data-action="excluir-saida-manual" data-id="${x.id}">${ICONS.trash}</button></span>
+          </div>`).join('') : '<p class="confirm-text">Nenhuma saída manual neste período.</p>'}
       </div>
 
       <h2 class="section-title" style="margin-top:0;">Produções no período</h2>
@@ -3872,6 +3939,21 @@
         currentProducaoPeriodo = el.dataset.periodo;
         if (currentProducaoPeriodo !== 'personalizado') { producaoPeriodoCustomFrom = ''; producaoPeriodoCustomTo = ''; }
         renderProducaoResumo();
+        break;
+      case 'nova-saida-manual':
+        openManualExitModal(null);
+        break;
+      case 'editar-saida-manual':
+        openManualExitModal(id);
+        break;
+      case 'excluir-saida-manual':
+        openConfirm({
+          title: 'Excluir saída',
+          message: 'Deseja excluir esta saída do Financeiro?',
+          confirmLabel: 'Excluir',
+          danger: true,
+          onConfirm: () => { deleteManualExit(id); renderFinanceiro(); toast('Saída excluída.', 'success'); },
+        });
         break;
       case 'financeiro-periodo':
         currentFinanceiroPeriodo = el.dataset.periodo;
