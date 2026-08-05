@@ -667,6 +667,7 @@
         id: uid(), ingredienteId, marca: 'Ajuste manual',
         quantidade: fromBase(deltaBase, ing.unidade), quantidadeBase: deltaBase, quantidadeRestanteBase: deltaBase,
         valorTotal: avgPrice * deltaBase, valorUnitario: avgPrice * (UNIT_BASE_FACTOR[ing.unidade] || 1),
+        considerarFinanceiro: false, origem: 'Ajuste manual',
         validade: '', dataCompra: todayISO(), criadoEm: Date.now(),
       });
       addMovement({ tipo: 'Ajuste manual', ingredienteId, quantidadeBase: deltaBase, data: todayISO(), descricao });
@@ -782,8 +783,16 @@
     if (!Array.isArray(db.settings.investimentos)) { db.settings.investimentos = []; changed = true; }
     if (!Array.isArray(db.settings.saidasManuais)) { db.settings.saidasManuais = []; changed = true; }
     db.purchases.forEach((p) => {
-      if (typeof p.considerarFinanceiro !== 'boolean') { p.considerarFinanceiro = true; changed = true; }
-      if (!p.origem) { p.origem = p.considerarFinanceiro ? 'Compra' : 'Estoque inicial'; changed = true; }
+      // Lotes criados por ajuste manual servem apenas para acertar o estoque e
+      // nunca representam dinheiro que saiu do caixa.
+      const ajusteManual = p.marca === 'Ajuste manual' || p.origem === 'Ajuste manual';
+      if (ajusteManual) {
+        if (p.considerarFinanceiro !== false) { p.considerarFinanceiro = false; changed = true; }
+        if (p.origem !== 'Ajuste manual') { p.origem = 'Ajuste manual'; changed = true; }
+      } else {
+        if (typeof p.considerarFinanceiro !== 'boolean') { p.considerarFinanceiro = true; changed = true; }
+        if (!p.origem) { p.origem = p.considerarFinanceiro ? 'Compra' : 'Estoque inicial'; changed = true; }
+      }
     });
     db.productions.forEach((p) => {
       if (typeof p.quantidadeReceitas !== 'number') {
@@ -3394,7 +3403,12 @@
   // produzida e número de produções usam a data da PRODUÇÃO (entram todas,
   // vendidas ou não).
   function getFinanceiroData(period, customFrom, customTo) {
-    const comprasNoPeriodo = db.purchases.filter((p) => p.considerarFinanceiro !== false && isDateInPeriod(p.dataCompra, period, customFrom, customTo));
+    const comprasNoPeriodo = db.purchases.filter((p) =>
+      p.considerarFinanceiro !== false
+      && p.marca !== 'Ajuste manual'
+      && p.origem !== 'Ajuste manual'
+      && isDateInPeriod(p.dataCompra, period, customFrom, customTo)
+    );
     const comprasMateriaisNoPeriodo = getMaterialPurchases().filter((p) => p.considerarFinanceiro !== false && isDateInPeriod(p.dataCompra, period, customFrom, customTo));
     const investimentosNoPeriodo = getInvestments().filter((x) => isDateInPeriod(x.dataCompra, period, customFrom, customTo));
     const saidasManuaisNoPeriodo = getManualExits().filter((x) => isDateInPeriod(x.data, period, customFrom, customTo));
@@ -3451,6 +3465,7 @@
 
     return {
       totalGastoCompras, totalGastoIngredientes, totalGastoSuprimentos, totalInvestimentos, totalSaidasManuais, saidasManuaisNoPeriodo, desembolsoTotal, gastosSuprimentosPorCategoria, faturamentoTotal, custoVendasTotal, lucroTotal, resultadoCaixaPeriodo, quantidadeVendidaTotal,
+      comprasNoPeriodo, comprasMateriaisNoPeriodo, investimentosNoPeriodo,
       quantidadeProduzidaTotal, numeroProducoes, ticketMedio, receitaMaisProduzida, ingredienteMaisGasto,
       temDados: numeroProducoes > 0 || comprasNoPeriodo.length > 0 || comprasMateriaisNoPeriodo.length > 0 || investimentosNoPeriodo.length > 0 || saidasManuaisNoPeriodo.length > 0 || getMixedBoxes().length > 0,
       producoesListadas: [...producoesPorData].sort((a, b) => b.criadoEm - a.criadoEm),
