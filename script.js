@@ -1942,6 +1942,9 @@
         <div class="form-grid cols-3" style="margin-bottom:16px;">
           <div class="field"><label>De</label><input type="date" id="producaoPeriodoDe" value="${producaoPeriodoCustomFrom}"></div>
           <div class="field"><label>Até</label><input type="date" id="producaoPeriodoAte" value="${producaoPeriodoCustomTo}"></div>
+          <div class="field" style="display:flex;align-items:flex-end;">
+            <button class="btn btn-primary" id="aplicarPeriodoProducaoBtn" type="button">${ICONS.check} Aplicar período</button>
+          </div>
         </div>
       ` : ''}
       <div class="dash-grid" style="margin-bottom:26px;">
@@ -1969,13 +1972,22 @@
     `;
 
     if (currentProducaoPeriodo === 'personalizado') {
-      const applyRange = () => {
-        producaoPeriodoCustomFrom = document.getElementById('producaoPeriodoDe').value;
-        producaoPeriodoCustomTo = document.getElementById('producaoPeriodoAte').value;
+      document.getElementById('aplicarPeriodoProducaoBtn').addEventListener('click', () => {
+        const from = document.getElementById('producaoPeriodoDe').value;
+        const to = document.getElementById('producaoPeriodoAte').value;
+        if (!from || !to) {
+          toast('Informe as duas datas do período.', 'warning');
+          return;
+        }
+        if (from > to) {
+          toast('A data inicial não pode ser maior que a data final.', 'danger');
+          return;
+        }
+        producaoPeriodoCustomFrom = from;
+        producaoPeriodoCustomTo = to;
         renderProducaoResumo();
-      };
-      document.getElementById('producaoPeriodoDe').addEventListener('change', applyRange);
-      document.getElementById('producaoPeriodoAte').addEventListener('change', applyRange);
+        toast('Período aplicado.', 'success');
+      });
     }
   }
 
@@ -2245,9 +2257,7 @@
         <div class="form-grid cols-3" style="margin-bottom:16px;">
           <div class="field"><label>De</label><input type="date" id="financeiroPeriodoDe" value="${financeiroPeriodoCustomFrom}"></div>
           <div class="field"><label>Até</label><input type="date" id="financeiroPeriodoAte" value="${financeiroPeriodoCustomTo}"></div>
-          <div class="field" style="display:flex;align-items:flex-end;"><button class="btn btn-primary" id="aplicarPeriodoFinanceiroBtn" type="button">${ICONS.check} Aplicar período</button></div>
         </div>
-        <p class="confirm-text" style="margin:-6px 0 16px;">Escolha as duas datas e clique em <strong>Aplicar período</strong>.</p>
       ` : ''}
 
       <div class="dash-grid" style="margin-bottom:22px;">
@@ -2313,13 +2323,13 @@
     `;
 
     if (currentFinanceiroPeriodo === 'personalizado') {
-      document.getElementById('aplicarPeriodoFinanceiroBtn').addEventListener('click', () => {
-        const from = document.getElementById('financeiroPeriodoDe').value;
-        const to = document.getElementById('financeiroPeriodoAte').value;
-        if (!from || !to) { toast('Informe as duas datas do período.', 'warning'); return; }
-        if (from > to) { toast('A data inicial não pode ser maior que a data final.', 'danger'); return; }
-        financeiroPeriodoCustomFrom = from; financeiroPeriodoCustomTo = to; renderFinanceiro(); toast('Período aplicado.', 'success');
-      });
+      const applyRange = () => {
+        financeiroPeriodoCustomFrom = document.getElementById('financeiroPeriodoDe').value;
+        financeiroPeriodoCustomTo = document.getElementById('financeiroPeriodoAte').value;
+        renderFinanceiro();
+      };
+      document.getElementById('financeiroPeriodoDe').addEventListener('change', applyRange);
+      document.getElementById('financeiroPeriodoAte').addEventListener('change', applyRange);
     }
 
     const list = document.getElementById('financeiroProducoesList');
