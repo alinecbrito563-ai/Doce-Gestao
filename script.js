@@ -70,7 +70,7 @@
       productions: [],
       movements: [],
       calculations: [],
-      settings: { multiplicador: 3, saldoInicial: 0, caixasMistas: [], materiais: [], comprasMateriais: [], movimentosMateriais: [], investimentos: [], movimentosProdutosProntos: [] },
+      settings: { multiplicador: 3 },
     };
   }
 
@@ -114,7 +114,7 @@
     tabelaResults.forEach((r) => { if (r.error) throw r.error; });
     const settingsRes = await sb.from('user_settings').select('payload').eq('user_id', userId).maybeSingle();
     if (settingsRes.error) throw settingsRes.error;
-    const loaded = { settings: (settingsRes.data && settingsRes.data.payload) ? settingsRes.data.payload : { multiplicador: 3, saldoInicial: 0, caixasMistas: [], materiais: [], comprasMateriais: [], movimentosMateriais: [], investimentos: [], movimentosProdutosProntos: [] } };
+    const loaded = { settings: (settingsRes.data && settingsRes.data.payload) ? settingsRes.data.payload : { multiplicador: 3 } };
     TABELAS.forEach((t, i) => { loaded[t] = (tabelaResults[i].data || []).map((r) => r.payload); });
     return Object.assign(defaultDB(), loaded);
   }
@@ -473,8 +473,6 @@
       quantidadeRestanteBase: quantidadeBase,
       valorTotal,
       valorUnitario,
-      considerarFinanceiro: data.considerarFinanceiro !== false,
-      origem: data.origem || (data.considerarFinanceiro === false ? 'Estoque inicial' : 'Compra'),
       validade: data.validade || '',
       dataCompra: data.dataCompra || todayISO(),
       criadoEm: Date.now(),
@@ -496,39 +494,23 @@
     if (!p) return { ok: false, message: 'Compra não encontrada.' };
     const ing = getIngredient(p.ingredienteId);
     const consumedBase = p.quantidadeBase - p.quantidadeRestanteBase;
-
-    // Algumas compras antigas podem ter `quantidade` zerada/inconsistente, embora
-    // `quantidadeBase` esteja correta. Nesses casos, recupera a quantidade real
-    // do lote antes de comparar qualquer alteração.
-    const quantidadeOriginal = Number(p.quantidade) > 0
-      ? Number(p.quantidade)
-      : fromBase(p.quantidadeBase, ing.unidade);
-    const quantidadeInformada = Number(data.quantidade);
-    const quantidade = Number.isFinite(quantidadeInformada) && quantidadeInformada > 0
-      ? quantidadeInformada
-      : quantidadeOriginal;
+    const quantidade = Number(data.quantidade) || 0;
     const quantidadeBase = toBase(quantidade, ing.unidade);
-    const quantidadeFoiAlterada = Math.abs(quantidadeBase - p.quantidadeBase) > EPS;
-
-    if (quantidadeFoiAlterada && quantidadeBase < consumedBase - EPS) {
+    // Nunca permitir reduzir um lote para menos do que já foi consumido dele —
+    // isso deixaria o histórico de consumo (FIFO) inconsistente com a realidade.
+    if (quantidadeBase < consumedBase - EPS) {
       return {
         ok: false,
         message: `Não é possível reduzir esta compra para menos do que já foi consumido deste lote (${formatQuantityBase(consumedBase, ing.unidade)} já utilizados).`,
       };
     }
-
-    const valorTotalInformado = Number(data.valorTotal);
-    const valorTotal = Number.isFinite(valorTotalInformado) ? valorTotalInformado : (Number(p.valorTotal) || 0);
+    const valorTotal = Number(data.valorTotal) || 0;
     p.marca = data.marca || '';
-    // Sempre persiste os valores informados. Isso também corrige lotes antigos
-    // que ficaram com `quantidade`, `quantidadeBase` ou saldo divergentes.
     p.quantidade = quantidade;
     p.quantidadeBase = quantidadeBase;
-    p.quantidadeRestanteBase = Math.max(0, quantidadeBase - consumedBase);
+    p.quantidadeRestanteBase = quantidadeBase - consumedBase;
     p.valorTotal = valorTotal;
     p.valorUnitario = quantidade > 0 ? valorTotal / quantidade : 0;
-    p.considerarFinanceiro = data.considerarFinanceiro !== false;
-    p.origem = data.origem || (p.considerarFinanceiro ? 'Compra' : 'Estoque inicial');
     p.validade = data.validade || '';
     p.dataCompra = data.dataCompra || p.dataCompra;
     saveDB();
@@ -564,7 +546,6 @@
     if (!p) return;
     addPurchase(p.ingredienteId, {
       marca: p.marca, quantidade: p.quantidade, valorTotal: p.valorTotal,
-      considerarFinanceiro: p.considerarFinanceiro !== false, origem: p.origem || 'Compra',
       validade: p.validade, dataCompra: todayISO(),
     });
   }
@@ -723,7 +704,6 @@
       nome: data.nome.trim(),
       ingredientes: data.ingredientes || [],
       rendimento: Number(data.rendimento) || 1,
-      pesoUnitarioPadrao: Number(data.pesoUnitarioPadrao) || 0,
       favorita: false,
       observacoes: data.observacoes || '',
       criadoEm: Date.now(),
@@ -739,7 +719,6 @@
     r.nome = data.nome.trim();
     r.ingredientes = data.ingredientes || [];
     r.rendimento = Number(data.rendimento) || 1;
-    r.pesoUnitarioPadrao = Number(data.pesoUnitarioPadrao) || 0;
     r.observacoes = data.observacoes || '';
     saveDB();
   }
@@ -772,30 +751,7 @@
   //     nunca um número inventado.
   function migrateProductions() {
     let changed = false;
-    if (!db.settings) { db.settings = { multiplicador: 3, saldoInicial: 0, caixasMistas: [], materiais: [], comprasMateriais: [], movimentosMateriais: [], investimentos: [], movimentosProdutosProntos: [] }; changed = true; }
-    if (typeof db.settings.saldoInicial !== 'number') { db.settings.saldoInicial = Number(db.settings.saldoInicial) || 0; changed = true; }
-    if (!Array.isArray(db.settings.caixasMistas)) { db.settings.caixasMistas = []; changed = true; }
-    if (!Array.isArray(db.settings.movimentosProdutosProntos)) { db.settings.movimentosProdutosProntos = []; changed = true; }
-    if (!Array.isArray(db.settings.materiais)) { db.settings.materiais = []; changed = true; }
-    if (!Array.isArray(db.settings.comprasMateriais)) { db.settings.comprasMateriais = []; changed = true; }
-    if (!Array.isArray(db.settings.movimentosMateriais)) { db.settings.movimentosMateriais = []; changed = true; }
-    if (!Array.isArray(db.settings.investimentos)) { db.settings.investimentos = []; changed = true; }
-    db.purchases.forEach((p) => {
-      if (typeof p.considerarFinanceiro !== 'boolean') { p.considerarFinanceiro = true; changed = true; }
-      if (!p.origem) { p.origem = p.considerarFinanceiro ? 'Compra' : 'Estoque inicial'; changed = true; }
-    });
     db.productions.forEach((p) => {
-      if (typeof p.quantidadeReceitas !== 'number') {
-        const receita = getRecipe(p.receitaId);
-        const rendimentoPadrao = receita ? (Number(receita.rendimento) || 1) : 1;
-        p.quantidadeReceitas = (Number(p.quantidadeProduzida) || rendimentoPadrao) / rendimentoPadrao;
-        changed = true;
-      }
-      if (typeof p.pesoUnitario !== 'number') {
-        const receita = getRecipe(p.receitaId);
-        p.pesoUnitario = receita ? (Number(receita.pesoUnitarioPadrao) || 0) : 0;
-        changed = true;
-      }
       if (typeof p.custoTotal !== 'number' || typeof p.custoNaoRegistrado === 'undefined') {
         if (Array.isArray(p.consumos) && p.consumos.length) {
           let total = 0;
@@ -847,15 +803,16 @@
     return `Estoque insuficiente para: ${partes.join('; ')}.`;
   }
 
-  // Calcula o total necessário de cada ingrediente conforme a quantidade de
-  // receitas completas feitas. O rendimento real não altera o consumo: ele
-  // serve para calcular o custo por unidade daquela produção específica.
-  function computeNeededByIngredient(recipe, quantidadeReceitas) {
-    const fator = Number(quantidadeReceitas) || 0;
+  // Calcula, para uma receita + quantidade produzida, o total necessário de
+  // cada ingrediente (agregando linhas repetidas), já convertido para a base
+  // de estoque do próprio ingrediente.
+  function computeNeededByIngredient(recipe, quantidadeProduzida) {
+    const rendimento = Number(recipe.rendimento) || 1;
+    const fator = quantidadeProduzida / rendimento;
     const neededByIngredient = {};
     recipe.ingredientes.forEach((item) => {
       const ing = getIngredient(item.ingredienteId);
-      if (!ing) return;
+      if (!ing) return; // ingrediente pode ter sido removido da receita/estoque anteriormente
       const usageBase = usageToBaseForIngredient(ing, item.quantidade, item.unidade) * fator;
       neededByIngredient[item.ingredienteId] = (neededByIngredient[item.ingredienteId] || 0) + usageBase;
     });
@@ -865,8 +822,8 @@
   // Verifica se uma produção é viável SEM alterar nada no banco de dados.
   // extraByIngredient (opcional) simula estoque adicional que seria devolvido
   // pela reversão de uma produção antiga, usado ao editar uma produção.
-  function validateProductionFeasibility(recipe, quantidadeReceitas, extraByIngredient) {
-    const neededByIngredient = computeNeededByIngredient(recipe, quantidadeReceitas);
+  function validateProductionFeasibility(recipe, quantidadeProduzida, extraByIngredient) {
+    const neededByIngredient = computeNeededByIngredient(recipe, quantidadeProduzida);
     const faltas = [];
     Object.keys(neededByIngredient).forEach((ingId) => {
       const extra = extraByIngredient ? extraByIngredient[ingId] : null;
@@ -906,14 +863,10 @@
   function registerProduction(data) {
     const recipe = getRecipe(data.receitaId);
     if (!recipe) { toast('Selecione uma receita válida.', 'danger'); return null; }
-    const quantidadeReceitas = Number(data.quantidadeReceitas) || 0;
     const quantidadeProduzida = Number(data.quantidadeProduzida) || 0;
-    const pesoUnitario = Number(data.pesoUnitario) || 0;
-    if (quantidadeReceitas <= 0) { toast('Informe quantas receitas foram feitas.', 'danger'); return null; }
-    if (quantidadeProduzida <= 0) { toast('Informe o rendimento real em unidades.', 'danger'); return null; }
-    if (pesoUnitario < 0) { toast('O peso por unidade não pode ser negativo.', 'danger'); return null; }
+    if (quantidadeProduzida <= 0) { toast('Informe uma quantidade produzida maior que zero.', 'danger'); return null; }
 
-    const feasibility = validateProductionFeasibility(recipe, quantidadeReceitas);
+    const feasibility = validateProductionFeasibility(recipe, quantidadeProduzida);
     if (!feasibility.ok) {
       // Nada foi alterado no estoque: a operação inteira é cancelada.
       toast(buildFaltaMessage(feasibility.faltas), 'danger');
@@ -925,9 +878,7 @@
       id: uid(),
       receitaId: recipe.id,
       receitaNome: recipe.nome,
-      quantidadeReceitas,
       quantidadeProduzida,
-      pesoUnitario,
       data: data.data || todayISO(),
       observacoes: data.observacoes || '',
       quantidadeVendida: 0,
@@ -963,20 +914,8 @@
     const faturamento = precoVendaUnitario * quantidadeVendida;
     const lucro = custoRegistrado ? faturamento - custoVendido : 0;
     const margemLucro = custoRegistrado && faturamento > 0 ? (lucro / faturamento) * 100 : 0;
-    const quantidadeAlocadaCaixas = typeof getAllocatedFromProduction === 'function' ? getAllocatedFromProduction(production.id) : 0;
-    const quantidadeMovimentada = typeof getReadyMovementTotal === 'function' ? getReadyMovementTotal(production.id) : 0;
-    const quantidadeBaixada = quantidadeVendida + quantidadeAlocadaCaixas + quantidadeMovimentada;
-    const quantidadeRestante = Math.max(0, quantidadeProduzida - quantidadeBaixada);
-    const percentualBaixado = quantidadeProduzida > 0 ? Math.min(100, (quantidadeBaixada / quantidadeProduzida) * 100) : 0;
-    const status = quantidadeRestante <= EPS
-      ? 'finalizada'
-      : quantidadeBaixada > EPS ? 'parcial' : 'estoque';
-    return {
-      custoTotal, custoUnitario, custoVendido, faturamento, lucro, margemLucro,
-      quantidadeProduzida, quantidadeVendida, quantidadeAlocadaCaixas,
-      quantidadeMovimentada, quantidadeBaixada, quantidadeRestante,
-      percentualBaixado, status, custoRegistrado,
-    };
+    const quantidadeRestante = Math.max(0, quantidadeProduzida - quantidadeVendida);
+    return { custoTotal, custoUnitario, custoVendido, faturamento, lucro, margemLucro, quantidadeRestante, custoRegistrado };
   }
 
   // Atualiza os dados de venda de uma produção já registrada. Nunca permite
@@ -986,10 +925,8 @@
     if (!p) return { ok: false, message: 'Produção não encontrada.' };
     const qtd = Number(quantidadeVendida) || 0;
     if (qtd < 0) return { ok: false, message: 'A quantidade vendida não pode ser negativa.' };
-    const allocatedToBoxes = getAllocatedFromProduction(p.id);
-    const maxDirectSale = Math.max(0, (Number(p.quantidadeProduzida) || 0) - allocatedToBoxes);
-    if (qtd > maxDirectSale + EPS) {
-      return { ok: false, message: `Esta produção possui ${formatNumber(allocatedToBoxes, 0)} unidade(s) reservadas em caixas. A venda avulsa máxima é ${formatNumber(maxDirectSale, 0)} un.` };
+    if (qtd > (Number(p.quantidadeProduzida) || 0) + EPS) {
+      return { ok: false, message: `A quantidade vendida não pode ser maior do que a quantidade produzida (${formatNumber(p.quantidadeProduzida, 0)} un.).` };
     }
     const preco = Number(precoVendaUnitario) || 0;
     if (preco < 0) return { ok: false, message: 'O preço de venda não pode ser negativo.' };
@@ -1025,14 +962,10 @@
 
   function deleteProduction(id) {
     const production = db.productions.find((p) => p.id === id);
-    if (!production) return { ok: false, message: 'Produção não encontrada.' };
-    const allocated = getAllocatedFromProduction(id);
-    if (allocated > EPS) return { ok: false, message: `Esta produção possui ${formatNumber(allocated, 0)} unidade(s) usadas em caixas. Exclua primeiro as caixas relacionadas.` };
-    db.settings.movimentosProdutosProntos = getReadyProductMovements().filter((m) => m.productionId !== id);
+    if (!production) return;
     reverseProduction(production);
     db.productions = db.productions.filter((p) => p.id !== id);
     saveDB();
-    return { ok: true };
   }
 
   // Edita uma produção já registrada: primeiro valida se a NOVA receita/
@@ -1043,19 +976,10 @@
   function updateProduction(id, data) {
     const production = db.productions.find((p) => p.id === id);
     if (!production) return { ok: false, message: 'Produção não encontrada.' };
-    const allocated = getAllocatedFromProduction(id);
-    if (allocated > EPS) return { ok: false, message: `Esta produção possui ${formatNumber(allocated, 0)} unidade(s) usadas em caixas. Exclua primeiro as caixas relacionadas para editar.` };
-    const movedReady = getReadyMovementTotal(id);
-    const soldReady = Number(production.quantidadeVendida) || 0;
     const newRecipe = getRecipe(data.receitaId);
     if (!newRecipe) return { ok: false, message: 'Selecione uma receita válida.' };
-    const newQuantidadeReceitas = Number(data.quantidadeReceitas) || 0;
     const newQuantidade = Number(data.quantidadeProduzida) || 0;
-    const newPesoUnitario = Number(data.pesoUnitario) || 0;
-    if (newQuantidadeReceitas <= 0) return { ok: false, message: 'Informe quantas receitas foram feitas.' };
-    if (newQuantidade <= 0) return { ok: false, message: 'Informe o rendimento real em unidades.' };
-    if (newQuantidade + EPS < soldReady + movedReady) return { ok: false, message: `A produção não pode ficar com menos de ${formatNumber(soldReady + movedReady, 0)} unidade(s), pois parte já foi vendida ou movimentada.` };
-    if (newPesoUnitario < 0) return { ok: false, message: 'O peso por unidade não pode ser negativo.' };
+    if (newQuantidade <= 0) return { ok: false, message: 'Informe uma quantidade produzida maior que zero.' };
 
     // Mapa do que seria devolvido, por ingrediente e por lote, se a produção
     // antiga fosse estornada agora.
@@ -1065,7 +989,7 @@
       item.lots.forEach((l) => { map[l.purchaseId] = (map[l.purchaseId] || 0) + l.quantidadeBase; });
     });
 
-    const feasibility = validateProductionFeasibility(newRecipe, newQuantidadeReceitas, extraByIngredient);
+    const feasibility = validateProductionFeasibility(newRecipe, newQuantidade, extraByIngredient);
     if (!feasibility.ok) {
       // Nada foi alterado: a produção antiga continua exatamente como estava.
       return { ok: false, message: buildFaltaMessage(feasibility.faltas) };
@@ -1073,13 +997,11 @@
 
     // Só agora, com a certeza de que a nova produção cabe, mutamos de fato:
     reverseProduction(production, { silent: true });
-    const applied = applyProductionConsumption(newRecipe, computeNeededByIngredient(newRecipe, newQuantidadeReceitas), data.data);
+    const applied = applyProductionConsumption(newRecipe, computeNeededByIngredient(newRecipe, newQuantidade), data.data);
 
     production.receitaId = newRecipe.id;
     production.receitaNome = newRecipe.nome;
-    production.quantidadeReceitas = newQuantidadeReceitas;
     production.quantidadeProduzida = newQuantidade;
-    production.pesoUnitario = newPesoUnitario;
     production.data = data.data || production.data;
     production.observacoes = data.observacoes || '';
     production.consumos = applied.consumos;
@@ -1096,630 +1018,6 @@
     }
     saveDB();
     return { ok: true };
-  }
-
-
-  /* ======================================================================
-     9.1 CAIXAS MISTAS E ESTOQUE DE PRODUTOS PRONTOS
-     ====================================================================== */
-
-  function getMixedBoxes() {
-    if (!db.settings.caixasMistas) db.settings.caixasMistas = [];
-    return db.settings.caixasMistas;
-  }
-
-  function getAllocatedFromProduction(productionId, ignoreBoxId) {
-    return getMixedBoxes().reduce((total, box) => {
-      if (ignoreBoxId && box.id === ignoreBoxId) return total;
-      return total + (box.alocacoes || [])
-        .filter((a) => a.productionId === productionId)
-        .reduce((s, a) => s + (Number(a.quantidade) || 0), 0);
-    }, 0);
-  }
-
-  function getReadyProductMovements() {
-    if (!Array.isArray(db.settings.movimentosProdutosProntos)) db.settings.movimentosProdutosProntos = [];
-    return db.settings.movimentosProdutosProntos;
-  }
-
-  function getReadyMovementTotal(productionId) {
-    return getReadyProductMovements()
-      .filter((m) => m.productionId === productionId)
-      .reduce((s, m) => s + (Number(m.quantidade) || 0), 0);
-  }
-
-  function getProductionReadyAvailable(production, ignoreBoxId) {
-    const produced = Number(production.quantidadeProduzida) || 0;
-    const soldDirect = Number(production.quantidadeVendida) || 0;
-    const allocated = getAllocatedFromProduction(production.id, ignoreBoxId);
-    const moved = getReadyMovementTotal(production.id);
-    return Math.max(0, produced - soldDirect - allocated - moved);
-  }
-
-  function registerReadyProductMovement(productionId, data) {
-    const production = db.productions.find((p) => p.id === productionId);
-    if (!production) return { ok: false, message: 'Produção não encontrada.' };
-    const quantidade = Number(data.quantidade) || 0;
-    if (quantidade <= 0) return { ok: false, message: 'Informe uma quantidade maior que zero.' };
-    const disponivel = getProductionReadyAvailable(production);
-    if (quantidade > disponivel + EPS) {
-      return { ok: false, message: `Há apenas ${formatNumber(disponivel, 0)} unidade(s) disponíveis nesta produção.` };
-    }
-    getReadyProductMovements().push({
-      id: uid(), productionId: production.id, receitaId: production.receitaId,
-      receitaNome: production.receitaNome, tipo: data.tipo || 'Consumo próprio',
-      quantidade, data: data.data || todayISO(), observacoes: data.observacoes || '', criadoEm: Date.now(),
-    });
-    saveDB();
-    return { ok: true };
-  }
-
-  function deleteReadyProductMovement(id) {
-    const exists = getReadyProductMovements().some((m) => m.id === id);
-    if (!exists) return { ok: false, message: 'Movimentação não encontrada.' };
-    db.settings.movimentosProdutosProntos = getReadyProductMovements().filter((m) => m.id !== id);
-    saveDB();
-    return { ok: true };
-  }
-
-  function getReadyStockByRecipe(recipeId, ignoreBoxId) {
-    return db.productions
-      .filter((p) => p.receitaId === recipeId)
-      .reduce((s, p) => s + getProductionReadyAvailable(p, ignoreBoxId), 0);
-  }
-
-  function planReadyProductConsumption(recipeId, quantityNeeded, ignoreBoxId) {
-    let remaining = Number(quantityNeeded) || 0;
-    const allocations = [];
-    const productions = db.productions
-      .filter((p) => p.receitaId === recipeId)
-      .sort((a, b) => (a.data < b.data ? -1 : a.data > b.data ? 1 : a.criadoEm - b.criadoEm));
-
-    for (const p of productions) {
-      if (remaining <= EPS) break;
-      const available = getProductionReadyAvailable(p, ignoreBoxId);
-      if (available <= EPS) continue;
-      const take = Math.min(available, remaining);
-      const m = computeProductionMetrics(p);
-      allocations.push({
-        productionId: p.id,
-        receitaId: p.receitaId,
-        receitaNome: p.receitaNome,
-        quantidade: take,
-        custoUnitario: m.custoRegistrado ? m.custoUnitario : 0,
-        custoNaoRegistrado: !m.custoRegistrado,
-      });
-      remaining -= take;
-    }
-    return { ok: remaining <= EPS, faltante: Math.max(0, remaining), allocations };
-  }
-
-  function registerMixedBox(data) {
-    const quantidadeCaixas = Number(data.quantidadeCaixas) || 0;
-    if (quantidadeCaixas <= 0) return { ok: false, message: 'Informe quantas caixas foram montadas.' };
-    const itens = (data.itens || []).filter((i) => i.receitaId && Number(i.quantidadePorCaixa) > 0);
-    if (!itens.length) return { ok: false, message: 'Adicione pelo menos um sabor à caixa.' };
-
-    const aggregated = {};
-    itens.forEach((i) => {
-      aggregated[i.receitaId] = (aggregated[i.receitaId] || 0) + Number(i.quantidadePorCaixa);
-    });
-
-    const allAllocations = [];
-    const normalizedItems = [];
-    for (const recipeId of Object.keys(aggregated)) {
-      const recipe = getRecipe(recipeId);
-      if (!recipe) return { ok: false, message: 'Uma das receitas selecionadas não existe mais.' };
-      const perBox = aggregated[recipeId];
-      const totalNeeded = perBox * quantidadeCaixas;
-      const plan = planReadyProductConsumption(recipeId, totalNeeded);
-      if (!plan.ok) {
-        return { ok: false, message: `Não há ${recipe.nome} suficiente no estoque pronto. Faltam ${formatNumber(plan.faltante, 0)} unidade(s).` };
-      }
-      normalizedItems.push({ receitaId: recipeId, receitaNome: recipe.nome, quantidadePorCaixa: perBox, quantidadeTotal: totalNeeded });
-      allAllocations.push(...plan.allocations);
-    }
-
-    const custoBrigadeiros = allAllocations.reduce((s, a) => s + (a.quantidade * a.custoUnitario), 0);
-    const custoEmbalagemUnitario = Number(data.custoEmbalagemUnitario) || 0;
-    const custoTotal = custoBrigadeiros + custoEmbalagemUnitario * quantidadeCaixas;
-    const custoNaoRegistrado = allAllocations.some((a) => a.custoNaoRegistrado);
-    const box = {
-      id: uid(),
-      nome: (data.nome || '').trim() || 'Caixa mista',
-      itens: normalizedItems,
-      alocacoes: allAllocations,
-      quantidadeCaixas,
-      quantidadeVendida: 0,
-      precoVendaUnitario: Number(data.precoVendaUnitario) || 0,
-      custoEmbalagemUnitario,
-      custoTotal,
-      custoNaoRegistrado,
-      data: data.data || todayISO(),
-      dataVenda: '',
-      observacoes: data.observacoes || '',
-      criadoEm: Date.now(),
-    };
-    getMixedBoxes().push(box);
-    saveDB();
-    return { ok: true, box };
-  }
-
-
-  function updateMixedBox(id, data) {
-    const box = getMixedBoxes().find((b) => b.id === id);
-    if (!box) return { ok: false, message: 'Caixa não encontrada.' };
-
-    const quantidadeCaixas = Number(data.quantidadeCaixas) || 0;
-    if (quantidadeCaixas <= 0) return { ok: false, message: 'Informe quantas caixas foram montadas.' };
-    if (quantidadeCaixas + EPS < (Number(box.quantidadeVendida) || 0)) {
-      return { ok: false, message: `Não é possível reduzir para menos de ${formatNumber(box.quantidadeVendida, 0)} caixa(s), pois essa quantidade já foi vendida.` };
-    }
-
-    const itens = (data.itens || []).filter((i) => i.receitaId && Number(i.quantidadePorCaixa) > 0);
-    if (!itens.length) return { ok: false, message: 'Adicione pelo menos um sabor à caixa.' };
-
-    const aggregated = {};
-    itens.forEach((i) => { aggregated[i.receitaId] = (aggregated[i.receitaId] || 0) + Number(i.quantidadePorCaixa); });
-
-    const allAllocations = [];
-    const normalizedItems = [];
-    for (const recipeId of Object.keys(aggregated)) {
-      const recipe = getRecipe(recipeId);
-      if (!recipe) return { ok: false, message: 'Uma das receitas selecionadas não existe mais.' };
-      const perBox = aggregated[recipeId];
-      const totalNeeded = perBox * quantidadeCaixas;
-      const plan = planReadyProductConsumption(recipeId, totalNeeded, id);
-      if (!plan.ok) {
-        return { ok: false, message: `Não há ${recipe.nome} suficiente no estoque pronto. Faltam ${formatNumber(plan.faltante, 0)} unidade(s).` };
-      }
-      normalizedItems.push({ receitaId: recipeId, receitaNome: recipe.nome, quantidadePorCaixa: perBox, quantidadeTotal: totalNeeded });
-      allAllocations.push(...plan.allocations);
-    }
-
-    const custoBrigadeiros = allAllocations.reduce((total, a) => total + a.quantidade * a.custoUnitario, 0);
-    const custoEmbalagemUnitario = Number(data.custoEmbalagemUnitario) || 0;
-
-    box.nome = (data.nome || '').trim() || 'Caixa mista';
-    box.itens = normalizedItems;
-    box.alocacoes = allAllocations;
-    box.quantidadeCaixas = quantidadeCaixas;
-    box.precoVendaUnitario = Number(data.precoVendaUnitario) || 0;
-    box.custoEmbalagemUnitario = custoEmbalagemUnitario;
-    box.custoTotal = custoBrigadeiros + custoEmbalagemUnitario * quantidadeCaixas;
-    box.custoNaoRegistrado = allAllocations.some((a) => a.custoNaoRegistrado);
-    box.data = data.data || box.data;
-    box.observacoes = data.observacoes || '';
-    saveDB();
-    return { ok: true, box };
-  }
-
-  function openEditMixedBoxModal(id) {
-    const box = getMixedBoxes().find((b) => b.id === id);
-    if (!box) return;
-    const draft = (box.itens || []).map((i) => ({ rowId: uid(), receitaId: i.receitaId, quantidadePorCaixa: i.quantidadePorCaixa }));
-
-    const renderRows = () => {
-      const rowsEl = document.getElementById('editMbRows');
-      if (!rowsEl) return;
-      rowsEl.innerHTML = draft.map((item) => `
-        <div class="caixa-item-row" data-row="${item.rowId}">
-          <div class="field"><label>Sabor</label><select data-role="edit-mb-receita" data-row="${item.rowId}">
-            ${db.recipes.map((r) => `<option value="${r.id}" ${r.id === item.receitaId ? 'selected' : ''}>${escapeHtml(r.nome)} (${formatNumber(getReadyStockByRecipe(r.id, box.id), 0)} disponíveis considerando esta caixa)</option>`).join('')}
-          </select></div>
-          <div class="field"><label>Unidades por caixa</label><input type="number" min="1" step="1" data-role="edit-mb-qtd" data-row="${item.rowId}" value="${item.quantidadePorCaixa}"></div>
-          <button class="btn btn-sm btn-icon btn-danger" type="button" data-role="edit-mb-remove" data-row="${item.rowId}">${ICONS.trash}</button>
-        </div>`).join('');
-
-      rowsEl.querySelectorAll('[data-role="edit-mb-receita"]').forEach((input) => input.addEventListener('change', (e) => {
-        const item = draft.find((x) => x.rowId === e.target.dataset.row);
-        if (item) item.receitaId = e.target.value;
-      }));
-      rowsEl.querySelectorAll('[data-role="edit-mb-qtd"]').forEach((input) => input.addEventListener('input', (e) => {
-        const item = draft.find((x) => x.rowId === e.target.dataset.row);
-        if (item) item.quantidadePorCaixa = Number(e.target.value) || 0;
-      }));
-      rowsEl.querySelectorAll('[data-role="edit-mb-remove"]').forEach((button) => button.addEventListener('click', () => {
-        if (draft.length <= 1) { toast('A caixa precisa ter pelo menos um sabor.', 'warning'); return; }
-        const index = draft.findIndex((x) => x.rowId === button.dataset.row);
-        if (index >= 0) draft.splice(index, 1);
-        renderRows();
-      }));
-    };
-
-    openModal({
-      title: 'Editar caixa montada',
-      wide: true,
-      bodyHTML: `
-        <div class="form-grid cols-3">
-          <div class="field"><label>Nome da caixa</label><input id="editMbNome" value="${escapeHtml(box.nome)}"></div>
-          <div class="field"><label>Quantidade de caixas</label><input type="number" min="${Number(box.quantidadeVendida) || 1}" step="1" id="editMbQuantidade" value="${box.quantidadeCaixas}"></div>
-          <div class="field"><label>Custo da embalagem (cada)</label><input type="number" min="0" step="any" id="editMbEmbalagem" value="${box.custoEmbalagemUnitario || 0}"></div>
-          <div class="field"><label>Preço de venda por caixa</label><input type="number" min="0" step="any" id="editMbPreco" value="${box.precoVendaUnitario || 0}"></div>
-          <div class="field"><label>Data</label><input type="date" id="editMbData" value="${box.data}"></div>
-          <div class="field"><label>Observações</label><input id="editMbObs" value="${escapeHtml(box.observacoes || '')}"></div>
-        </div>
-        <div id="editMbRows" style="margin-top:12px;"></div>
-        <button class="btn btn-sm" type="button" id="editMbAdd">${ICONS.plus} Adicionar sabor</button>`,
-      footerHTML: `<button class="btn btn-ghost" data-action="fechar-modal">Cancelar</button><button class="btn btn-primary" id="salvarEdicaoCaixaBtn">${ICONS.check} Salvar alterações</button>`,
-      onMount: () => {
-        renderRows();
-        document.getElementById('editMbAdd').addEventListener('click', () => {
-          draft.push({ rowId: uid(), receitaId: db.recipes[0].id, quantidadePorCaixa: 1 });
-          renderRows();
-        });
-        document.getElementById('salvarEdicaoCaixaBtn').addEventListener('click', () => {
-          const result = updateMixedBox(id, {
-            nome: document.getElementById('editMbNome').value,
-            quantidadeCaixas: document.getElementById('editMbQuantidade').value,
-            custoEmbalagemUnitario: document.getElementById('editMbEmbalagem').value,
-            precoVendaUnitario: document.getElementById('editMbPreco').value,
-            data: document.getElementById('editMbData').value,
-            observacoes: document.getElementById('editMbObs').value,
-            itens: draft.map((x) => ({ receitaId: x.receitaId, quantidadePorCaixa: x.quantidadePorCaixa })),
-          });
-          if (!result.ok) { toast(result.message, 'danger'); return; }
-          closeModal();
-          renderAll();
-          toast('Caixa atualizada e estoque pronto recalculado.', 'success');
-        });
-      },
-    });
-  }
-
-  function computeMixedBoxMetrics(box) {
-    const quantidade = Number(box.quantidadeCaixas) || 0;
-    const vendida = Number(box.quantidadeVendida) || 0;
-    const preco = Number(box.precoVendaUnitario) || 0;
-    const custoRegistrado = typeof box.custoTotal === 'number' && !box.custoNaoRegistrado;
-    const custoTotal = custoRegistrado ? box.custoTotal : 0;
-    const custoUnitario = custoRegistrado && quantidade > 0 ? custoTotal / quantidade : 0;
-    const custoVendido = custoUnitario * vendida;
-    const faturamento = preco * vendida;
-    const lucro = custoRegistrado ? faturamento - custoVendido : 0;
-    return { custoRegistrado, custoTotal, custoUnitario, custoVendido, faturamento, lucro, restante: Math.max(0, quantidade - vendida) };
-  }
-
-  function updateMixedBoxSales(id, data) {
-    const box = getMixedBoxes().find((b) => b.id === id);
-    if (!box) return { ok: false, message: 'Caixa não encontrada.' };
-    const qtd = Number(data.quantidadeVendida) || 0;
-    if (qtd < 0 || qtd > Number(box.quantidadeCaixas) + EPS) return { ok: false, message: 'A quantidade vendida deve ficar entre zero e a quantidade de caixas montadas.' };
-    box.quantidadeVendida = qtd;
-    box.precoVendaUnitario = Number(data.precoVendaUnitario) || 0;
-    box.dataVenda = data.dataVenda || (qtd > 0 ? (box.dataVenda || box.data) : '');
-    saveDB();
-    return { ok: true };
-  }
-
-  function deleteMixedBox(id) {
-    db.settings.caixasMistas = getMixedBoxes().filter((b) => b.id !== id);
-    saveDB();
-  }
-
-
-  /* ======================================================================
-     9.2 MATERIAIS E EMBALAGENS (ESTOQUE MANUAL + FINANCEIRO)
-     ====================================================================== */
-
-  function ensureMaterialData() {
-    if (!db.settings) db.settings = {};
-    if (!Array.isArray(db.settings.materiais)) db.settings.materiais = [];
-    if (!Array.isArray(db.settings.comprasMateriais)) db.settings.comprasMateriais = [];
-    if (!Array.isArray(db.settings.movimentosMateriais)) db.settings.movimentosMateriais = [];
-    if (!Array.isArray(db.settings.investimentos)) db.settings.investimentos = [];
-    db.settings.materiais.forEach((m) => { if (!m.categoria) m.categoria = 'Embalagens'; });
-  }
-
-  function getMaterials() { ensureMaterialData(); return db.settings.materiais; }
-  function getMaterialPurchases() { ensureMaterialData(); return db.settings.comprasMateriais; }
-  function getMaterialMovements() { ensureMaterialData(); return db.settings.movimentosMateriais; }
-  function getMaterial(id) { return getMaterials().find((m) => m.id === id); }
-
-  function getMaterialStock(id) {
-    const entradas = getMaterialPurchases().filter((p) => p.materialId === id).reduce((s, p) => s + (Number(p.quantidade) || 0), 0);
-    const saidas = getMaterialMovements().filter((m) => m.materialId === id).reduce((s, m) => s + (Number(m.quantidade) || 0), 0);
-    return entradas - saidas;
-  }
-
-  function addMaterial(data) {
-    const material = { id: uid(), nome: data.nome.trim(), categoria: data.categoria || 'Embalagens', unidade: data.unidade || 'un', estoqueMinimo: Number(data.estoqueMinimo) || 0, observacao: data.observacao || '', criadoEm: Date.now() };
-    getMaterials().push(material); saveDB(); return material;
-  }
-
-  function updateMaterial(id, data) {
-    const material = getMaterial(id);
-    if (!material) return { ok: false, message: 'Suprimento não encontrado.' };
-    const novaUnidade = (data.unidade || 'un').trim();
-    const possuiHistorico = getMaterialPurchases().some((p) => p.materialId === id) || getMaterialMovements().some((m) => m.materialId === id);
-    if (possuiHistorico && novaUnidade !== material.unidade) {
-      return { ok: false, message: 'Não é possível alterar a unidade de um suprimento que já possui compras ou baixas registradas.' };
-    }
-    material.nome = data.nome.trim();
-    material.categoria = data.categoria || 'Embalagens';
-    material.unidade = novaUnidade;
-    material.estoqueMinimo = Number(data.estoqueMinimo) || 0;
-    material.observacao = data.observacao || '';
-    saveDB();
-    return { ok: true };
-  }
-
-  function addMaterialPurchase(materialId, data) {
-    const quantidade = Number(data.quantidade) || 0;
-    const valorTotal = Number(data.valorTotal) || 0;
-    if (quantidade <= 0) return { ok: false, message: 'Informe uma quantidade válida.' };
-    getMaterialPurchases().push({
-      id: uid(), materialId, quantidade, valorTotal,
-      custoUnitario: valorTotal / quantidade,
-      dataCompra: data.dataCompra || todayISO(),
-      observacao: data.observacao || '',
-      considerarFinanceiro: data.considerarFinanceiro !== false,
-      origem: data.origem || (data.considerarFinanceiro === false ? 'Estoque inicial' : 'Compra'),
-      criadoEm: Date.now(),
-    });
-    saveDB(); return { ok: true };
-  }
-
-  function updateMaterialPurchase(id, data) {
-    const compra = getMaterialPurchases().find((p) => p.id === id);
-    if (!compra) return { ok: false, message: 'Compra de suprimento não encontrada.' };
-    const quantidade = Number(data.quantidade) || 0;
-    const valorTotal = Number(data.valorTotal) || 0;
-    if (quantidade <= 0) return { ok: false, message: 'Informe uma quantidade válida.' };
-
-    const totalOutrasCompras = getMaterialPurchases()
-      .filter((p) => p.materialId === compra.materialId && p.id !== id)
-      .reduce((s, p) => s + (Number(p.quantidade) || 0), 0);
-    const totalBaixas = getMaterialMovements()
-      .filter((m) => m.materialId === compra.materialId)
-      .reduce((s, m) => s + (Number(m.quantidade) || 0), 0);
-    if (totalOutrasCompras + quantidade < totalBaixas - EPS) {
-      return { ok: false, message: `Não é possível reduzir as compras para menos do que já foi usado (${formatNumber(totalBaixas, 2)} no total).` };
-    }
-
-    compra.quantidade = quantidade;
-    compra.valorTotal = valorTotal;
-    compra.custoUnitario = valorTotal / quantidade;
-    compra.dataCompra = data.dataCompra || compra.dataCompra;
-    compra.observacao = data.observacao || '';
-    compra.considerarFinanceiro = data.considerarFinanceiro !== false;
-    compra.origem = data.origem || (compra.considerarFinanceiro ? 'Compra' : 'Estoque inicial');
-    saveDB();
-    return { ok: true };
-  }
-
-  function addMaterialUse(materialId, data) {
-    const quantidade = Number(data.quantidade) || 0;
-    if (quantidade <= 0) return { ok: false, message: 'Informe uma quantidade válida.' };
-    const saldo = getMaterialStock(materialId);
-    if (quantidade > saldo + EPS) return { ok: false, message: `Estoque insuficiente. Disponível: ${formatNumber(saldo, 0)}.` };
-    getMaterialMovements().push({ id: uid(), materialId, quantidade, tipo: data.tipo || 'Consumo', data: data.data || todayISO(), observacao: data.observacao || '', criadoEm: Date.now() });
-    saveDB(); return { ok: true };
-  }
-
-  function deleteMaterial(id) {
-    db.settings.materiais = getMaterials().filter((m) => m.id !== id);
-    db.settings.comprasMateriais = getMaterialPurchases().filter((p) => p.materialId !== id);
-    db.settings.movimentosMateriais = getMaterialMovements().filter((m) => m.materialId !== id);
-    saveDB();
-  }
-
-  function openMaterialModal(id) {
-    const editing = Boolean(id);
-    const material = editing ? getMaterial(id) : null;
-    if (editing && !material) return;
-    const categoriaAtual = material ? (material.categoria || 'Embalagens') : 'Confeitos';
-    const option = (value) => `<option value="${value}" ${categoriaAtual === value ? 'selected' : ''}>${value}</option>`;
-    openModal({
-      title: editing ? 'Editar suprimento' : 'Novo suprimento',
-      bodyHTML: `<div class="form-grid">
-        <div class="field span-2"><label>Nome</label><input id="matNome" value="${material ? escapeHtml(material.nome) : ''}" placeholder="Ex.: Granulado, caixa para 4 doces..."></div>
-        <div class="field"><label>Categoria</label>
-          <select id="matCategoria">
-            ${option('Confeitos')}
-            ${option('Embalagens')}
-            ${option('Descartáveis')}
-            ${option('Limpeza')}
-            ${option('Outros')}
-          </select>
-        </div>
-        <div class="field"><label>Unidade</label><input id="matUnidade" value="${material ? escapeHtml(material.unidade) : 'g'}" placeholder="g, kg, un, caixa, rolo..."></div>
-        <div class="field"><label>Estoque mínimo</label><input type="number" min="0" step="any" id="matMinimo" value="${material ? Number(material.estoqueMinimo) || 0 : 0}"></div>
-        <div class="field span-2"><label>Observação</label><input id="matObs" value="${material ? escapeHtml(material.observacao || '') : ''}" placeholder="Opcional"></div>
-      </div>`,
-      footerHTML: `<button class="btn btn-ghost" data-action="fechar-modal">Cancelar</button><button class="btn btn-primary" id="salvarMaterialBtn">${editing ? 'Salvar alterações' : 'Salvar'}</button>`,
-      onMount: () => document.getElementById('salvarMaterialBtn').addEventListener('click', () => {
-        const nome = document.getElementById('matNome').value.trim();
-        if (!nome) { toast('Informe o nome do material.', 'danger'); return; }
-        const data = { nome, categoria: document.getElementById('matCategoria').value, unidade: document.getElementById('matUnidade').value, estoqueMinimo: document.getElementById('matMinimo').value, observacao: document.getElementById('matObs').value };
-        const result = editing ? updateMaterial(id, data) : { ok: true, material: addMaterial(data) };
-        if (!result.ok) { toast(result.message, 'danger'); return; }
-        closeModal(); renderAll(); toast(editing ? 'Suprimento atualizado.' : 'Suprimento cadastrado.', 'success');
-      }),
-    });
-  }
-
-  function openMaterialPurchaseModal(materialId, purchaseId) {
-    const material = getMaterial(materialId); if (!material) return;
-    const editing = Boolean(purchaseId);
-    const compra = editing ? getMaterialPurchases().find((p) => p.id === purchaseId) : null;
-    if (editing && !compra) return;
-    const considerar = compra ? compra.considerarFinanceiro !== false : true;
-    const origemAtual = compra ? (compra.origem || (considerar ? 'Compra' : 'Estoque inicial')) : 'Compra';
-    const origemOption = (value) => `<option value="${value}" ${origemAtual === value ? 'selected' : ''}>${value}</option>`;
-    openModal({
-      title: `${editing ? 'Editar compra' : 'Comprar'} — ${material.nome}`,
-      bodyHTML: `<div class="form-grid">
-        <div class="field"><label>Quantidade comprada</label><input type="number" min="0.01" step="any" id="matCompraQtd" value="${compra ? Number(compra.quantidade) || 0 : ''}"></div>
-        <div class="field"><label>Valor total</label><input type="number" min="0" step="any" id="matCompraValor" value="${compra ? Number(compra.valorTotal) || 0 : ''}"></div>
-        <div class="field"><label>Data</label><input type="date" id="matCompraData" value="${compra ? compra.dataCompra : todayISO()}"></div>
-        <div class="field"><label>Origem</label><select id="matCompraOrigem">
-          ${origemOption('Compra')}${origemOption('Estoque inicial')}${origemOption('Doação')}${origemOption('Presente')}${origemOption('Outro')}
-        </select></div>
-        <div class="field span-2"><label class="checkbox-row"><input type="checkbox" id="matCompraFinanceiro" ${considerar ? 'checked' : ''}> Considerar esta compra no Financeiro</label></div>
-        <div class="field span-2"><label>Observação</label><input id="matCompraObs" value="${compra ? escapeHtml(compra.observacao || '') : ''}" placeholder="Loja, pedido..."></div>
-      </div>`,
-      footerHTML: `<button class="btn btn-ghost" data-action="fechar-modal">Cancelar</button><button class="btn btn-primary" id="salvarCompraMaterialBtn">${editing ? 'Salvar alterações' : 'Registrar compra'}</button>`,
-      onMount: () => {
-        const financeiro = document.getElementById('matCompraFinanceiro');
-        const origem = document.getElementById('matCompraOrigem');
-        origem.addEventListener('change', () => {
-          if (origem.value !== 'Compra') financeiro.checked = false;
-        });
-        document.getElementById('salvarCompraMaterialBtn').addEventListener('click', () => {
-          const data = {
-            quantidade: document.getElementById('matCompraQtd').value,
-            valorTotal: document.getElementById('matCompraValor').value,
-            dataCompra: document.getElementById('matCompraData').value,
-            origem: origem.value,
-            considerarFinanceiro: financeiro.checked,
-            observacao: document.getElementById('matCompraObs').value,
-          };
-          const result = editing ? updateMaterialPurchase(purchaseId, data) : addMaterialPurchase(materialId, data);
-          if (!result.ok) { toast(result.message, 'danger'); return; }
-          closeModal(); renderAll(); toast(editing ? 'Compra do suprimento atualizada.' : 'Compra registrada.', 'success');
-        });
-      },
-    });
-  }
-
-  function openMaterialPurchasesModal(materialId) {
-    const material = getMaterial(materialId); if (!material) return;
-    const compras = getMaterialPurchases().filter((p) => p.materialId === materialId).sort((a,b) => (b.criadoEm||0)-(a.criadoEm||0));
-    openModal({
-      title: `Compras — ${material.nome}`,
-      wide: true,
-      bodyHTML: compras.length ? `<div class="purchase-list">${compras.map((p) => `
-        <div class="purchase-row">
-          <div><strong>${formatNumber(p.quantidade, 2)} ${escapeHtml(material.unidade)}</strong><small>${formatDateBR(p.dataCompra)} · ${formatMoney(p.valorTotal)} · ${escapeHtml(p.origem || (p.considerarFinanceiro === false ? 'Estoque inicial' : 'Compra'))}</small></div>
-          <div style="display:flex;align-items:center;gap:8px;"><span class="tag-badge tag-${p.considerarFinanceiro === false ? 'muted' : 'ok'}">${p.considerarFinanceiro === false ? 'Não afeta caixa' : 'Financeiro'}</span><button class="btn btn-sm" data-action="editar-compra-material" data-id="${p.id}" data-material-id="${materialId}">${ICONS.edit} Editar</button></div>
-        </div>`).join('')}</div>` : `<div class="empty-state">Nenhuma compra registrada.</div>`,
-      footerHTML: `<button class="btn btn-ghost" data-action="fechar-modal">Fechar</button>`,
-    });
-  }
-
-  function openMaterialUseModal(id) {
-    const material = getMaterial(id); if (!material) return;
-    openModal({
-      title: `Registrar uso — ${material.nome}`,
-      bodyHTML: `<p class="confirm-text">Saldo atual: <strong>${formatNumber(getMaterialStock(id), 2)} ${escapeHtml(material.unidade)}</strong></p>
-      <div class="form-grid">
-        <div class="field"><label>Quantidade</label><input type="number" min="0.01" step="any" id="matUsoQtd"></div>
-        <div class="field"><label>Tipo de baixa</label>
-          <select id="matUsoTipo">
-            <option value="Consumo">Consumo</option>
-            <option value="Perda">Perda</option>
-            <option value="Ajuste">Ajuste</option>
-            <option value="Outro">Outro</option>
-          </select>
-        </div>
-        <div class="field"><label>Data</label><input type="date" id="matUsoData" value="${todayISO()}"></div>
-        <div class="field span-2"><label>Observação</label><input id="matUsoObs" placeholder="Ex.: Granulado usado em 40 brigadeiros"></div>
-      </div>`,
-      footerHTML: `<button class="btn btn-ghost" data-action="fechar-modal">Cancelar</button><button class="btn btn-primary" id="salvarUsoMaterialBtn">Dar baixa</button>`,
-      onMount: () => document.getElementById('salvarUsoMaterialBtn').addEventListener('click', () => {
-        const result = addMaterialUse(id, { quantidade: document.getElementById('matUsoQtd').value, tipo: document.getElementById('matUsoTipo').value, data: document.getElementById('matUsoData').value, observacao: document.getElementById('matUsoObs').value });
-        if (!result.ok) { toast(result.message, 'danger'); return; }
-        closeModal(); renderAll(); toast('Baixa registrada.', 'success');
-      }),
-    });
-  }
-
-
-  function getInvestments() {
-    ensureMaterialData();
-    return db.settings.investimentos;
-  }
-
-  function getInvestment(id) {
-    return getInvestments().find((x) => x.id === id);
-  }
-
-  function addInvestment(data) {
-    const nome = String(data.nome || '').trim();
-    const valor = Number(data.valor) || 0;
-    if (!nome) return { ok: false, message: 'Informe o nome do investimento.' };
-    if (valor < 0) return { ok: false, message: 'O valor não pode ser negativo.' };
-    const record = {
-      id: uid(),
-      nome,
-      categoria: data.categoria || 'Utensílios',
-      marca: data.marca || '',
-      quantidade: Math.max(1, Number(data.quantidade) || 1),
-      valor,
-      dataCompra: data.dataCompra || todayISO(),
-      garantiaAte: data.garantiaAte || '',
-      observacao: data.observacao || '',
-      criadoEm: Date.now(),
-    };
-    db.settings.investimentos.push(record);
-    saveDB();
-    return { ok: true, investimento: record };
-  }
-
-  function updateInvestment(id, data) {
-    const record = getInvestment(id);
-    if (!record) return { ok: false, message: 'Investimento não encontrado.' };
-    const nome = String(data.nome || '').trim();
-    const valor = Number(data.valor) || 0;
-    if (!nome) return { ok: false, message: 'Informe o nome do investimento.' };
-    if (valor < 0) return { ok: false, message: 'O valor não pode ser negativo.' };
-    record.nome = nome;
-    record.categoria = data.categoria || 'Utensílios';
-    record.marca = data.marca || '';
-    record.quantidade = Math.max(1, Number(data.quantidade) || 1);
-    record.valor = valor;
-    record.dataCompra = data.dataCompra || record.dataCompra || todayISO();
-    record.garantiaAte = data.garantiaAte || '';
-    record.observacao = data.observacao || '';
-    saveDB();
-    return { ok: true };
-  }
-
-  function deleteInvestment(id) {
-    db.settings.investimentos = getInvestments().filter((x) => x.id !== id);
-    saveDB();
-  }
-
-  function openInvestmentModal(id) {
-    const editing = id ? getInvestment(id) : null;
-    openModal({
-      title: editing ? 'Editar investimento' : 'Novo investimento',
-      wide: true,
-      bodyHTML: `<div class="form-grid cols-3">
-        <div class="field span-2"><label>Item</label><input id="invNome" value="${editing ? escapeHtml(editing.nome) : ''}" placeholder="Ex.: Panela, espátula, balança, forno..."></div>
-        <div class="field"><label>Categoria</label>
-          <select id="invCategoria">
-            ${['Utensílios', 'Equipamentos', 'Móveis', 'Estrutura', 'Outros'].map((c) => `<option value="${c}" ${editing && editing.categoria === c ? 'selected' : ''}>${c}</option>`).join('')}
-          </select>
-        </div>
-        <div class="field"><label>Marca</label><input id="invMarca" value="${editing ? escapeHtml(editing.marca || '') : ''}" placeholder="Opcional"></div>
-        <div class="field"><label>Quantidade</label><input type="number" min="1" step="1" id="invQuantidade" value="${editing ? Number(editing.quantidade) || 1 : 1}"></div>
-        <div class="field"><label>Valor total pago</label><input type="number" min="0" step="any" id="invValor" value="${editing ? Number(editing.valor) || 0 : ''}" placeholder="0,00"></div>
-        <div class="field"><label>Data da compra</label><input type="date" id="invData" value="${editing ? editing.dataCompra : todayISO()}"></div>
-        <div class="field"><label>Garantia até</label><input type="date" id="invGarantia" value="${editing ? editing.garantiaAte || '' : ''}"></div>
-        <div class="field span-2"><label>Observação</label><input id="invObs" value="${editing ? escapeHtml(editing.observacao || '') : ''}" placeholder="Loja, modelo, número do pedido..."></div>
-      </div>
-      <p class="confirm-text" style="margin-top:12px;">Esse item entra no Financeiro como investimento, mas não possui baixa de estoque.</p>`,
-      footerHTML: `<button class="btn btn-ghost" data-action="fechar-modal">Cancelar</button><button class="btn btn-primary" id="salvarInvestimentoBtn">${editing ? 'Salvar alterações' : 'Registrar investimento'}</button>`,
-      onMount: () => document.getElementById('salvarInvestimentoBtn').addEventListener('click', () => {
-        const data = {
-          nome: document.getElementById('invNome').value,
-          categoria: document.getElementById('invCategoria').value,
-          marca: document.getElementById('invMarca').value,
-          quantidade: document.getElementById('invQuantidade').value,
-          valor: document.getElementById('invValor').value,
-          dataCompra: document.getElementById('invData').value,
-          garantiaAte: document.getElementById('invGarantia').value,
-          observacao: document.getElementById('invObs').value,
-        };
-        const result = editing ? updateInvestment(editing.id, data) : addInvestment(data);
-        if (!result.ok) { toast(result.message, 'danger'); return; }
-        closeModal();
-        renderAll();
-        toast(editing ? 'Investimento atualizado.' : 'Investimento registrado no Financeiro.', 'success');
-      }),
-    });
   }
 
   /* ======================================================================
@@ -1760,7 +1058,7 @@
 
   const VIEW_TITLES = {
     dashboard: ['Dashboard', 'Visão geral da sua confeitaria hoje'],
-    estoque: ['Estoque', 'Ingredientes controlados e suprimentos'],
+    estoque: ['Estoque', 'Ingredientes, lotes e níveis de estoque'],
     receitas: ['Receitas', 'Fichas técnicas e custos automáticos'],
     calculos: ['Cálculos', 'Calcule o valor de venda em segundos'],
     producoes: ['Produções', 'Registre produções e baixa automática de estoque'],
@@ -1769,9 +1067,8 @@
     configuracoes: ['Configurações', 'Preferências e backup dos seus dados'],
   };
 
-  let currentView = localStorage.getItem('doceGestaoUltimaTela') || 'dashboard';
+  let currentView = 'dashboard';
   let currentCalcTab = 'receita';
-  let currentEstoqueTab = 'controlados';
   let currentCaixaItems = [];
   let currentProducaoPeriodo = 'mes';
   let producaoPeriodoCustomFrom = '';
@@ -1782,7 +1079,6 @@
 
   function goToView(view) {
     currentView = view;
-    localStorage.setItem('doceGestaoUltimaTela', view);
     document.querySelectorAll('.view').forEach((v) => v.classList.remove('active'));
     document.getElementById('view-' + view).classList.add('active');
     document.querySelectorAll('.nav-item[data-view]').forEach((btn) => {
@@ -1819,7 +1115,6 @@
     renderEstoque();
     renderReceitas();
     renderProducaoResumo();
-    renderProducaoForm();
     renderProducaoLista();
     renderMovimentacoes();
     renderCalcHistory();
@@ -1924,135 +1219,46 @@
      ====================================================================== */
 
   function renderEstoque() {
-    ensureMaterialData();
     const grid = document.getElementById('estoqueGrid');
     const term = (document.getElementById('estoqueSearch').value || '').toLowerCase().trim();
-    const list = db.ingredients.filter((i) => i.nome.toLowerCase().includes(term)).sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
-    const materiais = getMaterials().map((m) => {
-      if (!m.categoria) m.categoria = 'Embalagens';
-      return m;
-    }).filter((m) => m.nome.toLowerCase().includes(term)).sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+    const list = db.ingredients
+      .filter((i) => i.nome.toLowerCase().includes(term))
+      .sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
 
-    const tabsHTML = `
-      <div class="calc-tabs" style="grid-column:1/-1;margin-bottom:18px;">
-        <button class="calc-tab ${currentEstoqueTab === 'controlados' ? 'active' : ''}" data-action="estoque-tab" data-tab="controlados">Ingredientes controlados</button>
-        <button class="calc-tab ${currentEstoqueTab === 'suprimentos' ? 'active' : ''}" data-action="estoque-tab" data-tab="suprimentos">Suprimentos</button>
-        <button class="calc-tab ${currentEstoqueTab === 'investimentos' ? 'active' : ''}" data-action="estoque-tab" data-tab="investimentos">Investimentos</button>
-      </div>`;
-
-    if (currentEstoqueTab === 'investimentos') {
-      const investimentos = getInvestments()
-        .filter((x) => x.nome.toLowerCase().includes(term))
-        .sort((a, b) => (b.dataCompra || '').localeCompare(a.dataCompra || '') || a.nome.localeCompare(b.nome, 'pt-BR'));
-      const totalInvestido = investimentos.reduce((s, x) => s + (Number(x.valor) || 0), 0);
-      grid.innerHTML = tabsHTML + `
-        <div style="grid-column:1/-1;display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px;">
-          <div>
-            <h2 class="section-title" style="margin:0;">Investimentos e equipamentos</h2>
-            <p class="confirm-text" style="margin:4px 0 0;">Utensílios, equipamentos e estrutura que não são consumidos pelo estoque.</p>
-          </div>
-          <button class="btn btn-primary btn-sm" data-action="novo-investimento">${ICONS.plus} Novo investimento</button>
-        </div>
-        <div class="panel" style="grid-column:1/-1;margin-bottom:8px;">
-          <div class="mini-row"><span class="name">Total investido nos itens exibidos</span><span class="value">${formatMoney(totalInvestido)}</span></div>
-        </div>
-        ${investimentos.length ? investimentos.map((x) => `
-          <div class="ing-card">
-            <div class="ing-card-top">
-              <h3>${escapeHtml(x.nome)}</h3>
-              <span class="tag-badge tag-ok">${escapeHtml(x.categoria || 'Utensílios')}</span>
-            </div>
-            <div class="ing-qty"><b>${formatMoney(x.valor)}</b> investidos</div>
-            <div class="ing-meta">
-              <span>${formatNumber(x.quantidade || 1, 0)} un.</span>
-              <span>Compra: ${formatDateBR(x.dataCompra)}</span>
-            </div>
-            <div class="ing-meta">
-              <span>${x.marca ? `Marca: ${escapeHtml(x.marca)}` : 'Sem marca informada'}</span>
-              <span>${x.garantiaAte ? `Garantia: ${formatDateBR(x.garantiaAte)}` : 'Sem garantia informada'}</span>
-            </div>
-            ${x.observacao ? `<p class="confirm-text">${escapeHtml(x.observacao)}</p>` : ''}
-            <div class="ing-actions">
-              <button class="btn btn-sm" data-action="editar-investimento" data-id="${x.id}">${ICONS.edit} Editar</button>
-              <button class="btn btn-sm btn-danger" data-action="excluir-investimento" data-id="${x.id}">${ICONS.trash} Excluir</button>
-            </div>
-          </div>
-        `).join('') : `<div class="empty-state">${ICONS.box2}<strong>Nenhum investimento encontrado</strong>Cadastre panelas, espátulas, formas, balanças, eletrodomésticos e outros bens.</div>`}
-      `;
+    if (!list.length) {
+      grid.innerHTML = `<div class="empty-state">${ICONS.box2}<strong>Nenhum ingrediente encontrado</strong>Cadastre seu primeiro ingrediente para começar a controlar o estoque.</div>`;
       return;
     }
 
-    if (currentEstoqueTab === 'suprimentos') {
-      const categorias = ['Confeitos', 'Embalagens', 'Descartáveis', 'Limpeza', 'Outros'];
-      const grupos = categorias.map((categoria) => {
-        const itens = materiais.filter((m) => m.categoria === categoria);
-        if (!itens.length) return '';
-        return `<div style="grid-column:1/-1;">
-          <h2 class="section-title" style="margin:18px 0 12px;">${escapeHtml(categoria)}</h2>
-          <div class="estoque-grid">${itens.map((m) => {
-            const saldo = getMaterialStock(m.id);
-            const baixo = saldo <= (Number(m.estoqueMinimo) || 0);
-            const compras = getMaterialPurchases().filter((p) => p.materialId === m.id);
-            const gasto = compras.filter((p) => p.considerarFinanceiro !== false).reduce((t, p) => t + (Number(p.valorTotal) || 0), 0);
-            const movimentos = getMaterialMovements().filter((mov) => mov.materialId === m.id);
-            return `<div class="ing-card">
-              <div class="ing-card-top"><h3>${escapeHtml(m.nome)}</h3><span class="tag-badge tag-${baixo ? 'warn' : 'ok'}">${baixo ? 'Estoque baixo' : 'Estoque ok'}</span></div>
-              <div class="ing-qty"><b>${formatNumber(saldo, saldo % 1 === 0 ? 0 : 2)} ${escapeHtml(m.unidade)}</b> em estoque</div>
-              <div class="ing-meta"><span>Mínimo: ${formatNumber(m.estoqueMinimo, 2)}</span><span>Total comprado: ${formatMoney(gasto)}</span></div>
-              <div class="ing-meta"><span>${movimentos.length} baixa${movimentos.length === 1 ? '' : 's'} registrada${movimentos.length === 1 ? '' : 's'}</span></div>
-              ${m.observacao ? `<p class="confirm-text">${escapeHtml(m.observacao)}</p>` : ''}
-              <div class="ing-actions">
-                <button class="btn btn-sm" data-action="editar-material" data-id="${m.id}">${ICONS.edit} Editar</button>
-                <button class="btn btn-sm" data-action="comprar-material" data-id="${m.id}">${ICONS.cart} Comprar</button>
-                <button class="btn btn-sm" data-action="ver-compras-material" data-id="${m.id}">Compras (${compras.length})</button>
-                <button class="btn btn-sm" data-action="usar-material" data-id="${m.id}">${ICONS.move} Dar baixa</button>
-                <button class="btn btn-sm btn-danger" data-action="excluir-material" data-id="${m.id}">${ICONS.trash}</button>
-              </div>
-            </div>`;
-          }).join('')}</div>
-        </div>`;
-      }).join('');
-
-      grid.innerHTML = tabsHTML + `
-        <div style="grid-column:1/-1;display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:6px;">
-          <div>
-            <h2 class="section-title" style="margin:0;">Suprimentos</h2>
-            <p class="confirm-text" style="margin:4px 0 0;">Confeitos, embalagens e outros itens com baixa manual.</p>
-          </div>
-          <button class="btn btn-primary btn-sm" data-action="novo-material">${ICONS.plus} Novo suprimento</button>
-        </div>
-        ${grupos || `<div class="empty-state">${ICONS.box2}<strong>Nenhum suprimento encontrado</strong>Cadastre granulado, confeitos, caixas, forminhas e outros itens.</div>`}
-      `;
-      return;
-    }
-
-    const ingredientesHTML = list.length ? list.map((ing) => {
+    grid.innerHTML = list.map((ing) => {
       const stockBase = getStockBase(ing.id);
       const minBase = toBase(ing.estoqueMinimo || 0, ing.unidade);
       const status = getStockStatus(ing);
       const pct = minBase > 0 ? Math.min(100, Math.max(4, (stockBase / (minBase * 2)) * 100)) : (stockBase > 0 ? 100 : 0);
       const nextV = getNextValidade(ing.id);
       const vStatus = nextV ? getValidadeStatus(nextV) : null;
-      return `<div class="ing-card" data-ingredient-id="${ing.id}">
-        <div class="ing-card-top"><h3>${escapeHtml(ing.nome)}</h3><span class="tag-badge tag-${status.level}">${status.label}</span></div>
-        <div class="ing-qty"><b>${formatQuantityBase(stockBase, ing.unidade)}</b> em estoque</div>
-        <div class="bar-track"><div class="bar-fill ${status.level === 'danger' ? 'empty' : status.level === 'warn' ? 'low' : ''}" style="width:${pct}%"></div></div>
-        <div class="ing-meta"><span>Mínimo: ${formatQuantityBase(minBase, ing.unidade)}</span><span>${nextV ? `Validade: ${formatDateBR(nextV)}` : 'Sem lote com validade'}</span></div>
-        ${vStatus && vStatus.level !== 'ok' ? `<span class="tag-badge tag-${vStatus.level}">${vStatus.label}</span>` : ''}
-        <div class="ing-actions">
-          <button class="btn btn-sm" data-action="editar-ingrediente" data-id="${ing.id}">${ICONS.edit} Editar</button>
-          <button class="btn btn-sm" data-action="comprar-ingrediente" data-id="${ing.id}">${ICONS.cart} Comprar</button>
-          <button class="btn btn-sm" data-action="movimentar-ingrediente" data-id="${ing.id}">${ICONS.move} Movimentar</button>
-          <button class="btn btn-sm btn-danger" data-action="excluir-ingrediente" data-id="${ing.id}">${ICONS.trash}</button>
+      return `
+        <div class="ing-card" data-ingredient-id="${ing.id}">
+          <div class="ing-card-top">
+            <h3>${escapeHtml(ing.nome)}</h3>
+            <span class="tag-badge tag-${status.level}">${status.label}</span>
+          </div>
+          <div class="ing-qty"><b>${formatQuantityBase(stockBase, ing.unidade)}</b> em estoque</div>
+          <div class="bar-track"><div class="bar-fill ${status.level === 'danger' ? 'empty' : status.level === 'warn' ? 'low' : ''}" style="width:${pct}%"></div></div>
+          <div class="ing-meta">
+            <span>Mínimo: ${formatQuantityBase(minBase, ing.unidade)}</span>
+            <span>${nextV ? `Validade: ${formatDateBR(nextV)}` : 'Sem lote com validade'}</span>
+          </div>
+          ${vStatus && vStatus.level !== 'ok' ? `<span class="tag-badge tag-${vStatus.level}">${vStatus.label}</span>` : ''}
+          <div class="ing-actions">
+            <button class="btn btn-sm" data-action="editar-ingrediente" data-id="${ing.id}">${ICONS.edit} Editar</button>
+            <button class="btn btn-sm" data-action="comprar-ingrediente" data-id="${ing.id}">${ICONS.cart} Comprar</button>
+            <button class="btn btn-sm" data-action="movimentar-ingrediente" data-id="${ing.id}">${ICONS.move} Movimentar</button>
+            <button class="btn btn-sm btn-danger" data-action="excluir-ingrediente" data-id="${ing.id}">${ICONS.trash}</button>
+          </div>
         </div>
-      </div>`;
-    }).join('') : `<div class="empty-state">${ICONS.box2}<strong>Nenhum ingrediente encontrado</strong>Cadastre seu primeiro ingrediente para começar a controlar o estoque.</div>`;
-
-    grid.innerHTML = tabsHTML + `
-      <div style="grid-column:1/-1;">
-        <h2 class="section-title" style="margin:0 0 4px;">Ingredientes controlados</h2>
-        <p class="confirm-text" style="margin:0 0 14px;">Itens baixados automaticamente pelas receitas e produções.</p>
-      </div>` + ingredientesHTML;
+      `;
+    }).join('');
   }
 
   function openIngredientModal(id) {
@@ -2146,9 +1352,6 @@
   function openPurchaseModal(ingredienteId, purchaseId) {
     const ing = getIngredient(ingredienteId);
     const editing = purchaseId ? db.purchases.find((p) => p.id === purchaseId) : null;
-    const editingQuantidade = editing
-      ? (Number(editing.quantidade) > 0 ? Number(editing.quantidade) : fromBase(editing.quantidadeBase, ing.unidade))
-      : '';
 
     function renderList() {
       const items = getPurchasesFor(ingredienteId).slice().reverse();
@@ -2157,7 +1360,7 @@
       if (!items.length) { listEl.innerHTML = `<p class="confirm-text">Nenhuma compra registrada ainda.</p>`; return; }
       listEl.innerHTML = items.map((p) => `
         <div class="mini-row">
-          <span class="name">${escapeHtml(p.marca || 'Sem marca')} — ${formatNumber(p.quantidade, 2)} ${ing.unidade} (${formatMoney(p.valorUnitario)}/${ing.unidade}) · ${formatDateBR(p.dataCompra)} <span class="badge ${p.considerarFinanceiro === false ? 'badge-muted' : 'badge-ok'}">${p.considerarFinanceiro === false ? escapeHtml(p.origem || 'Não afeta o caixa') : 'Financeiro'}</span></span>
+          <span class="name">${escapeHtml(p.marca || 'Sem marca')} — ${formatNumber(p.quantidade, 2)} ${ing.unidade} (${formatMoney(p.valorUnitario)}/${ing.unidade}) · ${formatDateBR(p.dataCompra)}</span>
           <span style="display:flex; gap:6px;">
             <button class="btn btn-sm btn-icon" data-action="editar-compra" data-id="${p.id}" data-ing="${ingredienteId}" title="Editar">${ICONS.edit}</button>
             <button class="btn btn-sm btn-icon" data-action="duplicar-compra" data-id="${p.id}" data-ing="${ingredienteId}" title="Duplicar">${ICONS.plus}</button>
@@ -2178,7 +1381,7 @@
           </div>
           <div class="field">
             <label>Quantidade (${ing.unidade})</label>
-            <input type="number" min="0" step="any" id="pQuantidade" value="${editing ? editingQuantidade : ''}" placeholder="0">
+            <input type="number" min="0" step="any" id="pQuantidade" value="${editing ? editing.quantidade : ''}" placeholder="0">
           </div>
           <div class="field">
             <label>Valor total pago (R$)</label>
@@ -2196,19 +1399,6 @@
             <label>Valor unitário (automático)</label>
             <input type="text" id="pValorUnitario" value="" disabled>
           </div>
-          <div class="field">
-            <label>Origem</label>
-            <select id="pOrigem">
-              ${['Compra','Estoque inicial','Doação','Presente','Outro'].map((o) => `<option value="${o}" ${(editing ? (editing.origem || (editing.considerarFinanceiro === false ? 'Estoque inicial' : 'Compra')) : 'Compra') === o ? 'selected' : ''}>${o}</option>`).join('')}
-            </select>
-          </div>
-          <div class="field span-2">
-            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
-              <input type="checkbox" id="pConsiderarFinanceiro" ${!editing || editing.considerarFinanceiro !== false ? 'checked' : ''}>
-              Considerar esta compra no Financeiro
-            </label>
-            <small class="muted">Desmarque para estoque inicial, doação, presente ou algo que não saiu do seu caixa.</small>
-          </div>
         </div>
         <div class="form-actions" style="margin-top:10px;">
           <button class="btn btn-primary" id="savePurchaseBtn">${editing ? 'Salvar alterações' : 'Adicionar compra'}</button>
@@ -2216,50 +1406,39 @@
         <h2 class="section-title" style="margin-top:22px; font-size:15px;">Lotes já registrados</h2>
         <div class="modal-sub-list" id="purchaseListArea"></div>
       `,
-      onMount: () => {
-        const quantidadeInput = document.getElementById('pQuantidade');
-        const valorTotalInput = document.getElementById('pValorTotal');
-        const valorUnitarioInput = document.getElementById('pValorUnitario');
+      onMount: (box) => {
+        // Os IDs pQuantidade/pData/etc. também existem na tela de Produção.
+        // Buscar os campos dentro do próprio modal evita que o cálculo pegue o campo errado.
+        const field = (id) => box.querySelector(`#${id}`);
 
         const recalc = () => {
-          const quantidade = quantidadeInput.valueAsNumber;
-          const valorTotal = valorTotalInput.valueAsNumber;
-
-          if (Number.isFinite(quantidade) && quantidade > 0 && Number.isFinite(valorTotal)) {
-            valorUnitarioInput.value = formatMoney(valorTotal / quantidade);
-          } else {
-            valorUnitarioInput.value = '—';
-          }
+          const q = Number(field('pQuantidade').value) || 0;
+          const v = Number(field('pValorTotal').value) || 0;
+          field('pValorUnitario').value = q > 0 ? formatMoney(v / q) : '—';
         };
 
-        quantidadeInput.addEventListener('input', recalc);
-        quantidadeInput.addEventListener('change', recalc);
-        valorTotalInput.addEventListener('input', recalc);
-        valorTotalInput.addEventListener('change', recalc);
-        setTimeout(recalc, 0);
+        field('pQuantidade').addEventListener('input', recalc);
+        field('pValorTotal').addEventListener('input', recalc);
+        recalc();
         renderList();
-        document.getElementById('savePurchaseBtn').addEventListener('click', () => {
+        field('savePurchaseBtn').addEventListener('click', () => {
           const data = {
-            marca: document.getElementById('pMarca').value,
-            quantidade: document.getElementById('pQuantidade').value,
-            valorTotal: document.getElementById('pValorTotal').value,
-            validade: document.getElementById('pValidade').value,
-            dataCompra: document.getElementById('pData').value,
-            considerarFinanceiro: document.getElementById('pConsiderarFinanceiro').checked,
-            origem: document.getElementById('pOrigem').value,
+            marca: field('pMarca').value,
+            quantidade: field('pQuantidade').value,
+            valorTotal: field('pValorTotal').value,
+            validade: field('pValidade').value,
+            dataCompra: field('pData').value,
           };
-          if ((!editing && (!data.quantidade || Number(data.quantidade) <= 0))) { toast('Informe uma quantidade válida.', 'danger'); return; }
+          if (!data.quantidade || Number(data.quantidade) <= 0) { toast('Informe uma quantidade válida.', 'danger'); return; }
           if (Number(data.valorTotal) < 0) { toast('O valor total não pode ser negativo.', 'danger'); return; }
           if (editing) {
             const result = updatePurchase(editing.id, data);
             if (!result.ok) { toast(result.message, 'danger'); return; }
-            closeModal();
-            renderAll();
-            toast(`Compra atualizada: ${formatNumber(Number(data.quantidade), 2)} ${ing.unidade} por ${formatMoney(Number(data.valorTotal))}.`, 'success');
-            return;
+            toast('Compra atualizada.', 'success');
+          } else {
+            addPurchase(ingredienteId, data);
+            toast('Compra registrada.', 'success');
           }
-          addPurchase(ingredienteId, data);
-          toast('Compra registrada.', 'success');
           renderAll();
           openPurchaseModal(ingredienteId); // reabre limpo para continuar cadastrando
         });
@@ -2358,7 +1537,7 @@
           <div class="recipe-card-top">
             <h3><button class="star-btn" data-action="favoritar-receita" data-id="${r.id}" title="Favoritar">${r.favorita ? ICONS.starFilled : ICONS.star}</button> ${escapeHtml(r.nome)}</h3>
           </div>
-          <div class="ing-meta"><span>${r.ingredientes.length} ingrediente(s)</span><span>Rende ${formatNumber(r.rendimento, 0)} un.${r.pesoUnitarioPadrao ? ` de ${formatNumber(r.pesoUnitarioPadrao, 0)} g` : ''}</span></div>
+          <div class="ing-meta"><span>${r.ingredientes.length} ingrediente(s)</span><span>Rende ${formatNumber(r.rendimento, 0)} un.</span></div>
           <div class="recipe-price-row"><span>Custo total</span><b>${formatMoney(cost.custoTotal)}</b></div>
           <div class="recipe-price-row"><span>Custo por unidade</span><b>${formatMoney(cost.custoUnitario)}</b></div>
           <div class="recipe-sell">${formatMoney(cost.valorVendaUnitario)} <span style="font-size:11px; color:var(--muted); font-family:var(--font-body);">venda/un.</span></div>
@@ -2474,12 +1653,8 @@
             <input type="text" id="rNome" value="${editing ? escapeHtml(editing.nome) : ''}" placeholder="Ex.: Brigadeiro tradicional">
           </div>
           <div class="field">
-            <label>Rendimento padrão (unidades)</label>
+            <label>Rendimento (unidades produzidas)</label>
             <input type="number" min="1" step="any" id="rRendimento" value="${editing ? editing.rendimento : ''}" placeholder="Ex.: 30">
-          </div>
-          <div class="field">
-            <label>Peso padrão por unidade (g)</label>
-            <input type="number" min="0" step="any" id="rPesoUnitario" value="${editing && editing.pesoUnitarioPadrao ? editing.pesoUnitarioPadrao : ''}" placeholder="Ex.: 18">
           </div>
         </div>
         <h2 class="section-title" style="font-size:15px; margin:18px 0 6px;">Ingredientes da receita</h2>
@@ -2514,11 +1689,10 @@
         document.getElementById('saveRecipeBtn').addEventListener('click', () => {
           const nome = document.getElementById('rNome').value.trim();
           const rendimento = document.getElementById('rRendimento').value;
-          const pesoUnitarioPadrao = document.getElementById('rPesoUnitario').value;
           if (!nome) { toast('Informe o nome da receita.', 'danger'); return; }
           if (!rendimento || Number(rendimento) <= 0) { toast('Informe um rendimento válido.', 'danger'); return; }
           const data = {
-            nome, rendimento, pesoUnitarioPadrao, ingredientes: collectValidRows(),
+            nome, rendimento, ingredientes: collectValidRows(),
             observacoes: document.getElementById('rObs').value,
           };
           if (editing) updateRecipe(editing.id, data); else addRecipe(data);
@@ -2588,50 +1762,31 @@
 
     else if (currentCalcTab === 'quantidade') {
       container.innerHTML = `
-        <div class="form-grid cols-3">
+        <div class="form-grid">
           <div class="field"><label>Receita</label><select id="calcReceita">${recipeOptions}</select></div>
-          <div class="field"><label>Quantidade de receitas</label><input type="number" min="0.01" step="any" id="calcQtdReceitas" value="1"></div>
-          <div class="field"><label>Rendimento real (un.)</label><input type="number" min="1" step="any" id="calcQtd" value="1"></div>
-          <div class="field"><label>Peso por unidade (g)</label><input type="number" min="0" step="any" id="calcPeso" value=""></div>
+          <div class="field"><label>Quantidade desejada (un.)</label><input type="number" min="1" step="any" id="calcQtd" value="1"></div>
         </div>
         <div class="recipe-cost-preview" id="calcPreview"></div>
         <div class="form-actions"><button class="btn btn-primary" id="calcSalvarBtn">Salvar cálculo</button></div>
       `;
-      const read = () => {
-        const r = getRecipe(document.getElementById('calcReceita').value);
-        const qtdReceitas = Math.max(0, Number(document.getElementById('calcQtdReceitas').value) || 0);
-        const qtd = Math.max(0, Number(document.getElementById('calcQtd').value) || 0);
-        const peso = Math.max(0, Number(document.getElementById('calcPeso').value) || 0);
-        const base = computeRecipeCost(r);
-        const custoTotal = base.custoTotal * qtdReceitas;
-        const custoUnitario = qtd > 0 ? custoTotal / qtd : 0;
-        const multiplicador = Number(db.settings.multiplicador) || 3;
-        return { r, qtdReceitas, qtd, peso, custoTotal, custoUnitario, vendaUnitario: custoUnitario * multiplicador };
-      };
       const update = () => {
-        const c = read();
-        document.getElementById('calcPreview').innerHTML = `
-          ${previewHTML(c.custoTotal, c.custoTotal * (Number(db.settings.multiplicador) || 3))}
-          <div class="recipe-price-row"><span>Rendimento real</span><b>${formatNumber(c.qtd, 0)} un.${c.peso ? ` de ${formatNumber(c.peso, 0)} g` : ''}</b></div>
-          <div class="recipe-price-row"><span>Custo por unidade</span><b>${formatMoney(c.custoUnitario)}</b></div>
-          <div class="recipe-price-row"><span>Venda sugerida por unidade</span><b>${formatMoney(c.vendaUnitario)}</b></div>
-          <div class="recipe-price-row"><span>Venda sugerida do cento</span><b>${formatMoney(c.vendaUnitario * 100)}</b></div>`;
-      };
-      ['calcReceita','calcQtdReceitas','calcQtd','calcPeso'].forEach((id) => document.getElementById(id).addEventListener(id === 'calcReceita' ? 'change' : 'input', update));
-      const selected = getRecipe(document.getElementById('calcReceita').value);
-      document.getElementById('calcQtd').value = selected ? selected.rendimento : 1;
-      document.getElementById('calcPeso').value = selected ? (selected.pesoUnitarioPadrao || '') : '';
-      document.getElementById('calcReceita').addEventListener('change', () => {
         const r = getRecipe(document.getElementById('calcReceita').value);
-        document.getElementById('calcQtd').value = r ? r.rendimento : 1;
-        document.getElementById('calcPeso').value = r ? (r.pesoUnitarioPadrao || '') : '';
-        update();
-      });
+        const qtd = Number(document.getElementById('calcQtd').value) || 0;
+        const cost = computeRecipeCost(r);
+        const custo = cost.custoUnitario * qtd;
+        const venda = cost.valorVendaUnitario * qtd;
+        document.getElementById('calcPreview').innerHTML = previewHTML(custo, venda);
+      };
+      document.getElementById('calcReceita').addEventListener('change', update);
+      document.getElementById('calcQtd').addEventListener('input', update);
       update();
       document.getElementById('calcSalvarBtn').addEventListener('click', () => {
-        const c = read();
-        if (c.qtdReceitas <= 0 || c.qtd <= 0) { toast('Informe a quantidade de receitas e o rendimento real.', 'danger'); return; }
-        addCalculation({ tipo: 'quantidade', titulo: `${formatNumber(c.qtd, 0)}x ${c.r.nome}${c.peso ? ` (${formatNumber(c.peso, 0)} g)` : ''}`, detalhes: { receitaId: c.r.id, receitaNome: c.r.nome, quantidadeReceitas: c.qtdReceitas, quantidade: c.qtd, pesoUnitario: c.peso }, custoTotal: c.custoTotal, valorVenda: c.vendaUnitario * c.qtd });
+        const r = getRecipe(document.getElementById('calcReceita').value);
+        const qtd = Number(document.getElementById('calcQtd').value) || 0;
+        const cost = computeRecipeCost(r);
+        const custo = cost.custoUnitario * qtd;
+        const venda = cost.valorVendaUnitario * qtd;
+        addCalculation({ tipo: 'quantidade', titulo: `${formatNumber(qtd, 0)}x ${r.nome}`, detalhes: { receitaId: r.id, receitaNome: r.nome, quantidade: qtd }, custoTotal: custo, valorVenda: venda });
         renderAll();
         toast('Cálculo salvo no histórico.', 'success');
       });
@@ -2682,127 +1837,45 @@
         }));
         updateCaixaPreview();
       };
-      const readCaixaCalculation = () => {
-        const quantidadeCaixas = Math.max(1, Number(document.getElementById('calcCaixaQuantidade')?.value) || 1);
-        const embalagemPorCaixa = Math.max(0, Number(document.getElementById('calcCaixaEmbalagem')?.value) || 0);
-
-        const linhas = [];
-        document.querySelectorAll('#caixaRows .caixa-item-row').forEach((row) => {
-          const receitaId = row.querySelector('[data-role="caixa-receita"]')?.value;
-          const quantidade = Number(row.querySelector('[data-role="caixa-qtd"]')?.value) || 0;
-          const receita = getRecipe(receitaId);
-          if (!receita || quantidade <= 0) return;
-          linhas.push({ receitaId: receita.id, receitaNome: receita.nome, quantidade });
-        });
-
-        // Agrupa sabores repetidos para não usar o mesmo estoque pronto duas vezes
-        // no planejamento FIFO do cálculo.
-        const agrupados = {};
-        linhas.forEach((linha) => {
-          if (!agrupados[linha.receitaId]) {
-            agrupados[linha.receitaId] = { receitaId: linha.receitaId, receitaNome: linha.receitaNome, quantidadePorCaixa: 0 };
-          }
-          agrupados[linha.receitaId].quantidadePorCaixa += linha.quantidade;
-        });
-
-        let custoBrigadeirosTotal = 0;
-        let possuiCustoEstimado = false;
-        let possuiCustoSemRegistro = false;
-        const itens = Object.values(agrupados).map((item) => {
-          const receita = getRecipe(item.receitaId);
-          const quantidadeTotal = item.quantidadePorCaixa * quantidadeCaixas;
-          const plano = planReadyProductConsumption(item.receitaId, quantidadeTotal);
-          const quantidadeReal = plano.allocations.reduce((s, a) => s + (Number(a.quantidade) || 0), 0);
-          const custoReal = plano.allocations.reduce((s, a) => s + ((Number(a.quantidade) || 0) * (Number(a.custoUnitario) || 0)), 0);
-          const temLoteSemCusto = plano.allocations.some((a) => a.custoNaoRegistrado);
-          const faltante = Math.max(0, quantidadeTotal - quantidadeReal);
-          const custoPadraoUnitario = computeRecipeCost(receita).custoUnitario;
-          const custoEstimadoFaltante = faltante * custoPadraoUnitario;
-          const custoTotalItem = custoReal + custoEstimadoFaltante;
-          const custoUnitarioMedio = quantidadeTotal > 0 ? custoTotalItem / quantidadeTotal : 0;
-
-          if (faltante > EPS) possuiCustoEstimado = true;
-          if (temLoteSemCusto) possuiCustoSemRegistro = true;
-          custoBrigadeirosTotal += custoTotalItem;
-
-          return {
-            receitaId: item.receitaId,
-            receitaNome: item.receitaNome,
-            quantidade: item.quantidadePorCaixa,
-            quantidadeTotal,
-            custoUnitario: custoUnitarioMedio,
-            subtotal: custoTotalItem / quantidadeCaixas,
-            quantidadeReal,
-            faltante,
-            custoReal,
-            custoEstimadoFaltante,
-          };
-        });
-
-        const custoBrigadeirosPorCaixa = custoBrigadeirosTotal / quantidadeCaixas;
-        const custoPorCaixa = custoBrigadeirosPorCaixa + embalagemPorCaixa;
-        const custoTotal = custoBrigadeirosTotal + embalagemPorCaixa * quantidadeCaixas;
-        return {
-          itens,
-          quantidadeCaixas,
-          embalagemPorCaixa,
-          custoBrigadeirosPorCaixa,
-          custoPorCaixa,
-          custoTotal,
-          possuiCustoEstimado,
-          possuiCustoSemRegistro,
-        };
-      };
       const updateCaixaPreview = () => {
-        const calc = readCaixaCalculation();
+        let custo = 0;
+        currentCaixaItems.forEach((item) => {
+          const r = getRecipe(item.receitaId);
+          if (!r) return;
+          const cost = computeRecipeCost(r);
+          custo += cost.custoUnitario * (Number(item.quantidade) || 0);
+        });
         const mult = Number(db.settings.multiplicador) || 3;
-        const detalhes = calc.itens.map((item) => `
-          <div class="item"><span>${formatNumber(item.quantidade, 0)}x ${escapeHtml(item.receitaNome)} (${formatMoney(item.custoUnitario)} cada)</span><b>${formatMoney(item.subtotal)}</b></div>
-        `).join('');
-        const avisos = [
-          calc.possuiCustoEstimado ? '<div class="item"><span>⚠️ Parte do cálculo usa o rendimento padrão porque não há brigadeiros prontos suficientes.</span><b>Estimativa</b></div>' : '',
-          calc.possuiCustoSemRegistro ? '<div class="item"><span>⚠️ Existe produção antiga sem custo real registrado.</span><b>Verificar</b></div>' : '',
-        ].join('');
-        document.getElementById('calcPreview').innerHTML = `
-          ${detalhes}
-          ${avisos}
-          <div class="item"><span>Brigadeiros por caixa</span><b>${formatMoney(calc.custoBrigadeirosPorCaixa)}</b></div>
-          <div class="item"><span>Embalagem por caixa</span><b>${formatMoney(calc.embalagemPorCaixa)}</b></div>
-          <div class="item"><span>Custo por caixa</span><b>${formatMoney(calc.custoPorCaixa)}</b></div>
-          <div class="item"><span>Custo total (${formatNumber(calc.quantidadeCaixas, 0)} caixa(s))</span><b>${formatMoney(calc.custoTotal)}</b></div>
-          <div class="item"><span>Valor de venda sugerido</span><b>${formatMoney(calc.custoTotal * mult)}</b></div>
-        `;
+        document.getElementById('calcPreview').innerHTML = previewHTML(custo, custo * mult);
       };
       container.innerHTML = `
         <div id="caixaRows"></div>
         <button class="btn btn-sm" id="addCaixaRowBtn" type="button">${ICONS.plus} Adicionar sabor</button>
-        <div class="form-grid cols-3" style="margin-top:14px;">
-          <div class="field"><label>Quantidade de caixas</label><input type="number" min="1" step="1" id="calcCaixaQuantidade" value="1"></div>
-          <div class="field"><label>Embalagem por caixa</label><input type="number" min="0" step="any" id="calcCaixaEmbalagem" value="0"></div>
-        </div>
         <div class="recipe-cost-preview" id="calcPreview" style="margin-top:14px;"></div>
         <div class="form-actions"><button class="btn btn-primary" id="calcSalvarBtn">Salvar cálculo</button></div>
       `;
       renderCaixaRows();
-      document.getElementById('calcCaixaQuantidade').addEventListener('input', updateCaixaPreview);
-      document.getElementById('calcCaixaEmbalagem').addEventListener('input', updateCaixaPreview);
       document.getElementById('addCaixaRowBtn').addEventListener('click', () => {
         currentCaixaItems.push({ rowId: uid(), receitaId: db.recipes[0].id, quantidade: 1 });
         renderCaixaRows();
       });
       document.getElementById('calcSalvarBtn').addEventListener('click', () => {
-        const calc = readCaixaCalculation();
-        const detalheItens = calc.itens.map((i) => ({ receitaId: i.receitaId, receitaNome: i.receitaNome, quantidade: i.quantidade, custoUnitario: i.custoUnitario, subtotal: i.subtotal }));
-        if (!detalheItens.length) {
-          toast('Adicione pelo menos um sabor à caixa.', 'error');
-          return;
-        }
+        let custo = 0;
+        const detalheItens = [];
+        currentCaixaItems.forEach((item) => {
+          const r = getRecipe(item.receitaId);
+          if (!r) return;
+          const cost = computeRecipeCost(r);
+          const itemCusto = cost.custoUnitario * (Number(item.quantidade) || 0);
+          custo += itemCusto;
+          detalheItens.push({ receitaNome: r.nome, quantidade: item.quantidade });
+        });
         const mult = Number(db.settings.multiplicador) || 3;
         addCalculation({
           tipo: 'caixa',
-          titulo: `${formatNumber(calc.quantidadeCaixas, 0)} caixa(s) mista(s) (${detalheItens.map((i) => i.quantidade + 'x ' + i.receitaNome).join(', ')})`,
-          detalhes: { itens: detalheItens, quantidadeCaixas: calc.quantidadeCaixas, embalagem: calc.embalagemPorCaixa, custoPorCaixa: calc.custoPorCaixa, usaCustoEstimado: calc.possuiCustoEstimado, possuiCustoSemRegistro: calc.possuiCustoSemRegistro },
-          custoTotal: calc.custoTotal, valorVenda: calc.custoTotal * mult,
+          titulo: `Caixa mista (${detalheItens.map((i) => i.quantidade + 'x ' + i.receitaNome).join(', ')})`,
+          detalhes: { itens: detalheItens },
+          custoTotal: custo, valorVenda: custo * mult,
         });
         currentCaixaItems = [];
         renderCalcForm();
@@ -2860,14 +1933,6 @@
       custoVendasTotal += m.custoVendido;
       quantidadeVendidaTotal += Number(p.quantidadeVendida) || 0;
     });
-    getMixedBoxes()
-      .filter((b) => (Number(b.quantidadeVendida) || 0) > 0 && isDateInPeriod(b.dataVenda, currentProducaoPeriodo, producaoPeriodoCustomFrom, producaoPeriodoCustomTo))
-      .forEach((b) => {
-        const m = computeMixedBoxMetrics(b);
-        faturamentoTotal += m.faturamento;
-        custoVendasTotal += m.custoVendido;
-        quantidadeVendidaTotal += Number(b.quantidadeVendida) || 0;
-      });
     const lucroTotal = faturamentoTotal - custoVendasTotal;
     const margemTotal = faturamentoTotal > 0 ? (lucroTotal / faturamentoTotal) * 100 : 0;
 
@@ -2882,11 +1947,7 @@
         <div class="form-grid cols-3" style="margin-bottom:16px;">
           <div class="field"><label>De</label><input type="date" id="producaoPeriodoDe" value="${producaoPeriodoCustomFrom}"></div>
           <div class="field"><label>Até</label><input type="date" id="producaoPeriodoAte" value="${producaoPeriodoCustomTo}"></div>
-          <div class="field" style="display:flex;align-items:flex-end;">
-            <button class="btn btn-primary" id="aplicarPeriodoProducaoBtn" type="button">${ICONS.check} Aplicar período</button>
-          </div>
         </div>
-        <p class="confirm-text" style="margin:-6px 0 16px;">Escolha as duas datas e clique em <strong>Aplicar período</strong>.</p>
       ` : ''}
       <div class="dash-grid" style="margin-bottom:26px;">
         <div class="stat-card tone-success">
@@ -2913,24 +1974,13 @@
     `;
 
     if (currentProducaoPeriodo === 'personalizado') {
-      document.getElementById('aplicarPeriodoProducaoBtn').addEventListener('click', () => {
-        const from = document.getElementById('producaoPeriodoDe').value;
-        const to = document.getElementById('producaoPeriodoAte').value;
-
-        if (!from || !to) {
-          toast('Informe as duas datas do período.', 'warning');
-          return;
-        }
-        if (from > to) {
-          toast('A data inicial não pode ser maior que a data final.', 'danger');
-          return;
-        }
-
-        producaoPeriodoCustomFrom = from;
-        producaoPeriodoCustomTo = to;
+      const applyRange = () => {
+        producaoPeriodoCustomFrom = document.getElementById('producaoPeriodoDe').value;
+        producaoPeriodoCustomTo = document.getElementById('producaoPeriodoAte').value;
         renderProducaoResumo();
-        toast('Período aplicado.', 'success');
-      });
+      };
+      document.getElementById('producaoPeriodoDe').addEventListener('change', applyRange);
+      document.getElementById('producaoPeriodoAte').addEventListener('change', applyRange);
     }
   }
 
@@ -2944,267 +1994,69 @@
       <h2 class="section-title" style="margin-top:0;">Registrar nova produção</h2>
       <div class="form-grid cols-3">
         <div class="field"><label>Receita</label><select id="pReceita">${db.recipes.map((r) => `<option value="${r.id}">${escapeHtml(r.nome)}</option>`).join('')}</select></div>
-        <div class="field"><label>Quantidade de receitas feitas</label><input type="number" min="0.01" step="any" id="pQuantidadeReceitas" value="1"></div>
-        <div class="field"><label>Rendimento real (unidades)</label><input type="number" min="1" step="any" id="pQuantidade" value="${db.recipes[0] ? db.recipes[0].rendimento : 1}"></div>
-        <div class="field"><label>Peso por unidade (g)</label><input type="number" min="0" step="any" id="pPesoUnitario" value="${db.recipes[0] && db.recipes[0].pesoUnitarioPadrao ? db.recipes[0].pesoUnitarioPadrao : ''}" placeholder="Ex.: 18"></div>
+        <div class="field"><label>Quantidade produzida</label><input type="number" min="1" step="any" id="pQuantidade" value="1"></div>
         <div class="field"><label>Data</label><input type="date" id="pData" value="${todayISO()}"></div>
         <div class="field span-2"><label>Observações</label><input type="text" id="pObs" placeholder="Opcional"></div>
       </div>
       <div class="form-actions"><button class="btn btn-primary" id="registrarProducaoBtn">${ICONS.factory} Registrar produção</button></div>
-      <div id="estoqueProntoResumo" style="margin-top:28px;"></div>
-      <div id="caixaMistaForm" style="margin-top:28px;"></div>
-      <div id="caixasMistasList" style="margin-top:28px;"></div>
     `;
-    document.getElementById('pReceita').addEventListener('change', (e) => {
-      const receita = getRecipe(e.target.value);
-      if (!receita) return;
-      document.getElementById('pQuantidade').value = receita.rendimento || 1;
-      document.getElementById('pPesoUnitario').value = receita.pesoUnitarioPadrao || '';
-    });
     document.getElementById('registrarProducaoBtn').addEventListener('click', () => {
       const receitaId = document.getElementById('pReceita').value;
-      const quantidadeReceitas = document.getElementById('pQuantidadeReceitas').value;
       const quantidadeProduzida = document.getElementById('pQuantidade').value;
-      const pesoUnitario = document.getElementById('pPesoUnitario').value;
       const data = document.getElementById('pData').value;
       const observacoes = document.getElementById('pObs').value;
-      if (!quantidadeReceitas || Number(quantidadeReceitas) <= 0) { toast('Informe quantas receitas foram feitas.', 'danger'); return; }
-      if (!quantidadeProduzida || Number(quantidadeProduzida) <= 0) { toast('Informe o rendimento real.', 'danger'); return; }
-      const production = registerProduction({ receitaId, quantidadeReceitas, quantidadeProduzida, pesoUnitario, data, observacoes });
-      if (!production) return;
-      window.__mixedBoxDraft = [];
+      if (!quantidadeProduzida || Number(quantidadeProduzida) <= 0) { toast('Informe uma quantidade válida.', 'danger'); return; }
+      registerProduction({ receitaId, quantidadeProduzida, data, observacoes });
+      renderProducaoForm(); // reseta o formulário para a próxima produção
       renderAll();
     });
-    renderReadyStockSummary();
-    renderMixedBoxForm();
-    renderMixedBoxesList();
   }
-
-  function renderReadyStockSummary() {
-    const el = document.getElementById('estoqueProntoResumo');
-    if (!el) return;
-    const rows = db.recipes.map((r) => ({ recipe: r, qty: getReadyStockByRecipe(r.id) })).filter((x) => x.qty > EPS);
-    el.innerHTML = `
-      <h2 class="section-title">Estoque de brigadeiros prontos</h2>
-      ${rows.length ? `<div class="dash-grid">${rows.map((x) => `<div class="stat-card"><div class="stat-value">${formatNumber(x.qty, 0)}</div><div class="stat-label">${escapeHtml(x.recipe.nome)}</div></div>`).join('')}</div>` : `<p class="confirm-text">Nenhum brigadeiro disponível. Registre uma produção primeiro.</p>`}
-    `;
-  }
-
-  function renderMixedBoxForm() {
-    const el = document.getElementById('caixaMistaForm');
-    if (!el) return;
-    if (!db.recipes.length) { el.innerHTML = ''; return; }
-    if (!window.__mixedBoxDraft || !window.__mixedBoxDraft.length) window.__mixedBoxDraft = [{ rowId: uid(), receitaId: db.recipes[0].id, quantidadePorCaixa: 1 }];
-    if (!window.__mixedBoxFormDraft) window.__mixedBoxFormDraft = { nome: '', quantidadeCaixas: 1, embalagem: 0, preco: 0, data: todayISO(), observacoes: '' };
-    const draft = window.__mixedBoxDraft;
-    const formDraft = window.__mixedBoxFormDraft;
-    const captureFormDraft = () => {
-      const byId = (id) => document.getElementById(id);
-      if (byId('mbNome')) formDraft.nome = byId('mbNome').value;
-      if (byId('mbQuantidadeCaixas')) formDraft.quantidadeCaixas = byId('mbQuantidadeCaixas').value;
-      if (byId('mbEmbalagem')) formDraft.embalagem = byId('mbEmbalagem').value;
-      if (byId('mbPreco')) formDraft.preco = byId('mbPreco').value;
-      if (byId('mbData')) formDraft.data = byId('mbData').value;
-      if (byId('mbObs')) formDraft.observacoes = byId('mbObs').value;
-    };
-    el.innerHTML = `
-      <h2 class="section-title">Montar caixa mista</h2>
-      <div class="form-grid cols-3">
-        <div class="field"><label>Nome da caixa</label><input type="text" id="mbNome" placeholder="Ex.: Caixa 4 sabores" value="${escapeHtml(formDraft.nome || '')}"></div>
-        <div class="field"><label>Quantidade de caixas</label><input type="number" min="1" step="1" id="mbQuantidadeCaixas" value="${formDraft.quantidadeCaixas || 1}"></div>
-        <div class="field"><label>Custo da embalagem (cada)</label><input type="number" min="0" step="any" id="mbEmbalagem" value="${formDraft.embalagem || 0}"></div>
-        <div class="field"><label>Preço de venda por caixa</label><input type="number" min="0" step="any" id="mbPreco" value="${formDraft.preco || 0}"></div>
-        <div class="field"><label>Data</label><input type="date" id="mbData" value="${formDraft.data || todayISO()}"></div>
-        <div class="field"><label>Observações</label><input type="text" id="mbObs" placeholder="Opcional" value="${escapeHtml(formDraft.observacoes || '')}"></div>
-      </div>
-      <div id="mbRows" style="margin-top:12px;">${draft.map((item) => `
-        <div class="caixa-item-row" data-row="${item.rowId}">
-          <div class="field"><label>Sabor</label><select data-role="mb-receita" data-row="${item.rowId}">${db.recipes.map((r) => `<option value="${r.id}" ${r.id === item.receitaId ? 'selected' : ''}>${escapeHtml(r.nome)} (${formatNumber(getReadyStockByRecipe(r.id), 0)} disponíveis)</option>`).join('')}</select></div>
-          <div class="field"><label>Unidades por caixa</label><input type="number" min="1" step="1" data-role="mb-qtd" data-row="${item.rowId}" value="${item.quantidadePorCaixa}"></div>
-          <button class="btn btn-sm btn-icon btn-danger" data-action="remover-linha-caixa-mista" data-row="${item.rowId}" type="button">${ICONS.trash}</button>
-        </div>`).join('')}</div>
-      <button class="btn btn-sm" id="mbAddRow" type="button">${ICONS.plus} Adicionar sabor</button>
-      <div class="form-actions"><button class="btn btn-primary" id="mbMontarBtn">Montar caixas</button></div>
-    `;
-    el.querySelectorAll('[data-role="mb-receita"]').forEach((inp) => inp.addEventListener('change', (e) => { draft.find((x) => x.rowId === e.target.dataset.row).receitaId = e.target.value; }));
-    el.querySelectorAll('[data-role="mb-qtd"]').forEach((inp) => inp.addEventListener('input', (e) => { draft.find((x) => x.rowId === e.target.dataset.row).quantidadePorCaixa = Number(e.target.value) || 0; }));
-    ['mbNome','mbQuantidadeCaixas','mbEmbalagem','mbPreco','mbData','mbObs'].forEach((id) => document.getElementById(id).addEventListener('input', captureFormDraft));
-    document.getElementById('mbAddRow').addEventListener('click', () => { captureFormDraft(); draft.push({ rowId: uid(), receitaId: db.recipes[0].id, quantidadePorCaixa: 1 }); renderMixedBoxForm(); });
-    document.getElementById('mbMontarBtn').addEventListener('click', () => {
-      const result = registerMixedBox({
-        nome: document.getElementById('mbNome').value,
-        quantidadeCaixas: document.getElementById('mbQuantidadeCaixas').value,
-        custoEmbalagemUnitario: document.getElementById('mbEmbalagem').value,
-        precoVendaUnitario: document.getElementById('mbPreco').value,
-        data: document.getElementById('mbData').value,
-        observacoes: document.getElementById('mbObs').value,
-        itens: draft.map((x) => ({ receitaId: x.receitaId, quantidadePorCaixa: x.quantidadePorCaixa })),
-      });
-      if (!result.ok) { toast(result.message, 'danger'); return; }
-      window.__mixedBoxDraft = [];
-      window.__mixedBoxFormDraft = null;
-      renderAll();
-      toast('Caixas montadas e estoque pronto atualizado.', 'success');
-    });
-  }
-
-  function renderMixedBoxesList() {
-    const el = document.getElementById('caixasMistasList');
-    if (!el) return;
-    const boxes = [...getMixedBoxes()].sort((a, b) => b.criadoEm - a.criadoEm);
-    el.innerHTML = `<h2 class="section-title">Caixas montadas</h2>` + (boxes.length ? boxes.map((box) => {
-      const m = computeMixedBoxMetrics(box);
-      return `<div class="producao-item" data-box-id="${box.id}">
-        <div class="info"><strong>${escapeHtml(box.nome)} · ${formatNumber(box.quantidadeCaixas, 0)} caixa(s)</strong><div>${box.itens.map((i) => `${formatNumber(i.quantidadePorCaixa, 0)}x ${escapeHtml(i.receitaNome)}`).join(' · ')} · ${formatDateBR(box.data)}</div></div>
-        <div class="form-grid cols-3" style="margin:10px 0;">
-          <div class="field"><label>Caixas vendidas</label><input type="number" min="0" step="1" data-role="mb-vendida" value="${box.quantidadeVendida || ''}"></div>
-          <div class="field"><label>Preço por caixa</label><input type="number" min="0" step="any" data-role="mb-preco" value="${box.precoVendaUnitario || ''}"></div>
-          <div class="field"><label>Data da venda</label><input type="date" data-role="mb-data-venda" value="${box.dataVenda || box.data}"></div>
-        </div>
-        ${m.custoRegistrado ? `<div class="recipe-price-row"><span>Custo por caixa</span><b>${formatMoney(m.custoUnitario)}</b></div>` : `<div class="recipe-price-row"><span>Custo</span><b>Custo parcialmente não registrado</b></div>`}
-        <div class="recipe-price-row"><span>Faturamento</span><b>${formatMoney(m.faturamento)}</b></div>
-        <div class="recipe-price-row"><span>Lucro estimado</span><b>${formatMoney(m.lucro)}</b></div>
-        <div class="recipe-price-row"><span>Caixas restantes</span><b>${formatNumber(m.restante, 0)}</b></div>
-        <div class="venda-fields" style="margin-top:10px;"><button class="btn btn-sm" data-action="editar-caixa-mista" data-id="${box.id}">${ICONS.edit} Editar</button><button class="btn btn-sm btn-icon btn-danger" data-action="excluir-caixa-mista" data-id="${box.id}" title="Excluir">${ICONS.trash}</button></div>
-      </div>`;
-    }).join('') : `<p class="confirm-text">Nenhuma caixa montada ainda.</p>`);
-
-    el.querySelectorAll('.producao-item[data-box-id] input').forEach((inp) => inp.addEventListener('change', (e) => {
-      const row = e.target.closest('[data-box-id]');
-      const result = updateMixedBoxSales(row.dataset.boxId, {
-        quantidadeVendida: row.querySelector('[data-role="mb-vendida"]').value,
-        precoVendaUnitario: row.querySelector('[data-role="mb-preco"]').value,
-        dataVenda: row.querySelector('[data-role="mb-data-venda"]').value,
-      });
-      if (!result.ok) { toast(result.message, 'danger'); renderAll(); return; }
-      renderAll();
-      toast('Venda das caixas atualizada.', 'success');
-    }));
-  }
-
-  function openReadyProductMovementModal(productionId) {
-    const p = db.productions.find((x) => x.id === productionId);
-    if (!p) return;
-    const available = getProductionReadyAvailable(p);
-    if (available <= EPS) { toast('Não há unidades disponíveis nesta produção.', 'warning'); return; }
-    openModal({
-      title: 'Movimentar brigadeiros prontos',
-      bodyHTML: `
-        <p class="confirm-text">Disponível nesta produção: <strong>${formatNumber(available, 0)} unidade(s)</strong>.</p>
-        <div class="form-grid cols-3">
-          <div class="field"><label>Tipo</label><select id="rpmTipo"><option>Consumo próprio</option><option>Degustação</option><option>Perda</option><option>Ajuste manual</option></select></div>
-          <div class="field"><label>Quantidade</label><input type="number" min="1" max="${available}" step="1" id="rpmQuantidade" value="1"></div>
-          <div class="field"><label>Data</label><input type="date" id="rpmData" value="${todayISO()}"></div>
-          <div class="field span-2"><label>Observações</label><input type="text" id="rpmObs" placeholder="Ex.: brigadeiros que sobraram de ontem"></div>
-        </div>`,
-      footerHTML: `<button class="btn btn-ghost" data-action="fechar-modal">Cancelar</button><button class="btn btn-primary" id="saveReadyMovementBtn">Registrar movimentação</button>`,
-      onMount: () => document.getElementById('saveReadyMovementBtn').addEventListener('click', () => {
-        const result = registerReadyProductMovement(productionId, { tipo: document.getElementById('rpmTipo').value, quantidade: document.getElementById('rpmQuantidade').value, data: document.getElementById('rpmData').value, observacoes: document.getElementById('rpmObs').value });
-        if (!result.ok) { toast(result.message, 'danger'); return; }
-        closeModal(); renderAll(); toast('Movimentação registrada e estoque pronto atualizado.', 'success');
-      }),
-    });
-  }
-
-  let ocultarProducoesFinalizadas = false;
 
   function renderProducaoLista() {
     const list = document.getElementById('producoesList');
-    const todasProducoes = [...db.productions].sort((a, b) => b.criadoEm - a.criadoEm);
-    const finalizadas = todasProducoes.filter((p) => computeProductionMetrics(p).status === 'finalizada').length;
-    const productions = ocultarProducoesFinalizadas
-      ? todasProducoes.filter((p) => computeProductionMetrics(p).status !== 'finalizada')
-      : todasProducoes;
-
-    if (!todasProducoes.length) {
+    const productions = [...db.productions].sort((a, b) => b.criadoEm - a.criadoEm);
+    if (!productions.length) {
       list.innerHTML = `<div class="empty-state">${ICONS.factory}<strong>Nenhuma produção registrada</strong>Registre sua primeira produção para acompanhar o histórico.</div>`;
       return;
     }
-
-    const toolbar = `
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:14px;padding:12px 14px;border:1px solid #ead8d1;border-radius:12px;background:#fffaf8;">
-        <div><strong>${productions.length} produção(ões) exibida(s)</strong><div style="font-size:12px;opacity:.72;margin-top:2px;">${finalizadas} finalizada(s)</div></div>
-        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;"><input type="checkbox" id="toggleFinalizadas" ${ocultarProducoesFinalizadas ? 'checked' : ''}> Ocultar produções finalizadas</label>
-      </div>`;
-
-    if (!productions.length) {
-      list.innerHTML = toolbar + `<div class="empty-state">${ICONS.check}<strong>Tudo finalizado</strong>Não há produções com saldo disponível.</div>`;
-      document.getElementById('toggleFinalizadas').addEventListener('change', (e) => { ocultarProducoesFinalizadas = e.target.checked; renderProducaoLista(); });
-      return;
-    }
-
-    list.innerHTML = toolbar + productions.map((p) => {
+    list.innerHTML = productions.map((p) => {
       const m = computeProductionMetrics(p);
-      const statusConfig = m.status === 'finalizada'
-        ? { label: 'Finalizada', fundo: '#e8f6ee', texto: '#26734d', borda: '#bfe2ce' }
-        : m.status === 'parcial'
-          ? { label: 'Parcial', fundo: '#fff4df', texto: '#986414', borda: '#f1d39b' }
-          : { label: 'Em estoque', fundo: '#eef3ff', texto: '#3e5f9c', borda: '#cbd8f2' };
-      const movimentos = getReadyProductMovements().filter((mov) => mov.productionId === p.id);
-      const totalBaixado = m.quantidadeVendida + m.quantidadeAlocadaCaixas + m.quantidadeMovimentada;
       return `
-      <div class="producao-item" data-id="${p.id}" style="padding:16px 18px;${m.status === 'finalizada' ? 'opacity:.86;background:#fcfcfc;' : ''}">
-        <div style="display:grid;grid-template-columns:minmax(230px,1.5fr) minmax(260px,1fr) auto;gap:16px;align-items:center;">
-          <div class="info" style="min-width:0;">
-            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-              <strong style="font-size:15px;">${escapeHtml(p.receitaNome)}</strong>
-              <span style="display:inline-flex;align-items:center;padding:4px 8px;border-radius:999px;background:${statusConfig.fundo};color:${statusConfig.texto};border:1px solid ${statusConfig.borda};font-size:11px;font-weight:700;">${statusConfig.label}</span>
-            </div>
-            <div style="margin-top:4px;font-size:12px;opacity:.72;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${formatNumber(p.quantidadeProduzida, 0)} un.${p.pesoUnitario ? ` de ${formatNumber(p.pesoUnitario, 0)} g` : ''} · ${formatNumber(p.quantidadeReceitas || 1, 2)} receita(s) · ${formatDateBR(p.data)}${p.observacoes ? ' · ' + escapeHtml(p.observacoes) : ''}</div>
+      <div class="producao-item" data-id="${p.id}">
+        <div class="info">
+          <strong>${escapeHtml(p.receitaNome)} · ${formatNumber(p.quantidadeProduzida, 0)} un.</strong>
+          <div>${formatDateBR(p.data)}${p.observacoes ? ' — ' + escapeHtml(p.observacoes) : ''}</div>
+        </div>
+        <div class="form-grid cols-3" style="margin:10px 0;">
+          <div class="field">
+            <label>Qtd. vendida</label>
+            <input type="number" min="0" step="any" data-role="qtdVendida" data-id="${p.id}" value="${p.quantidadeVendida || ''}">
           </div>
-
-          <div>
-            <div style="display:flex;justify-content:space-between;gap:10px;font-size:11px;margin-bottom:5px;"><span><strong>${formatNumber(totalBaixado, 0)}</strong> baixadas</span><span><strong>${formatNumber(m.quantidadeRestante, 0)}</strong> disponíveis</span></div>
-            <div style="height:7px;background:#eee5e1;border-radius:999px;overflow:hidden;"><div style="height:100%;width:${m.percentualBaixado}%;background:${statusConfig.texto};border-radius:999px;opacity:.65;"></div></div>
+          <div class="field">
+            <label>Preço de venda (un.)</label>
+            <input type="number" min="0" step="any" data-role="precoVenda" data-id="${p.id}" value="${p.precoVendaUnitario || ''}">
           </div>
-
-          <div style="display:flex;align-items:center;gap:6px;justify-content:flex-end;">
-            ${m.quantidadeRestante > EPS ? `<button class="btn btn-sm" data-action="movimentar-produto-pronto" data-id="${p.id}">${ICONS.move} Movimentar</button>` : ''}
-            <button class="btn btn-sm" data-action="toggle-detalhes-producao" data-id="${p.id}">Ver detalhes</button>
-            <button class="btn btn-sm btn-icon" data-action="editar-producao" data-id="${p.id}" title="Editar">${ICONS.edit}</button>
-            <button class="btn btn-sm btn-icon btn-danger" data-action="excluir-producao" data-id="${p.id}" title="Excluir">${ICONS.trash}</button>
+          <div class="field">
+            <label>Data da venda</label>
+            <input type="date" data-role="dataVenda" data-id="${p.id}" value="${p.dataVenda || p.data}">
           </div>
         </div>
-
-        <div style="display:grid;grid-template-columns:repeat(5,minmax(76px,1fr));gap:7px;margin-top:12px;">
-          <div style="padding:7px 9px;border-radius:9px;background:#faf5f2;"><span style="display:block;font-size:10px;opacity:.65;">Produzido</span><strong style="font-size:13px;">${formatNumber(m.quantidadeProduzida, 0)}</strong></div>
-          <div style="padding:7px 9px;border-radius:9px;background:#faf5f2;"><span style="display:block;font-size:10px;opacity:.65;">Vendido</span><strong style="font-size:13px;">${formatNumber(m.quantidadeVendida, 0)}</strong></div>
-          <div style="padding:7px 9px;border-radius:9px;background:#faf5f2;"><span style="display:block;font-size:10px;opacity:.65;">Caixinhas</span><strong style="font-size:13px;">${formatNumber(m.quantidadeAlocadaCaixas, 0)}</strong></div>
-          <div style="padding:7px 9px;border-radius:9px;background:#faf5f2;"><span style="display:block;font-size:10px;opacity:.65;">Movimentado</span><strong style="font-size:13px;">${formatNumber(m.quantidadeMovimentada, 0)}</strong></div>
-          <div style="padding:7px 9px;border-radius:9px;background:${m.quantidadeRestante <= EPS ? '#e8f6ee' : '#fff1eb'};"><span style="display:block;font-size:10px;opacity:.65;">Disponível</span><strong style="font-size:13px;">${formatNumber(m.quantidadeRestante, 0)}</strong></div>
+        ${!m.custoRegistrado ? `
+          <div class="recipe-price-row"><span>Custo</span><b>Custo não registrado</b></div>
+        ` : `
+          <div class="recipe-price-row"><span>Custo total da produção</span><b>${formatMoney(m.custoTotal)}</b></div>
+          <div class="recipe-price-row"><span>Custo das unidades vendidas</span><b>${formatMoney(m.custoVendido)}</b></div>
+        `}
+        <div class="recipe-price-row"><span>Faturamento total</span><b>${formatMoney(m.faturamento)}</b></div>
+        <div class="recipe-price-row"><span>Lucro estimado (${formatNumber(m.margemLucro, 1)}%)</span><b>${formatMoney(m.lucro)}</b></div>
+        <div class="recipe-price-row"><span>Quantidade restante</span><b>${formatNumber(m.quantidadeRestante, 0)} un.</b></div>
+        <div class="venda-fields" style="margin-top:10px;">
+          <button class="btn btn-sm btn-icon" data-action="editar-producao" data-id="${p.id}" title="Editar">${ICONS.edit}</button>
+          <button class="btn btn-sm btn-icon btn-danger" data-action="excluir-producao" data-id="${p.id}" title="Excluir">${ICONS.trash}</button>
         </div>
-
-        <div data-role="detalhes-producao" style="display:none;margin-top:14px;padding-top:14px;border-top:1px solid #ead8d1;">
-          <div class="form-grid cols-3" style="margin:0 0 10px;">
-            <div class="field"><label>Qtd. vendida</label><input type="number" min="0" step="any" data-role="qtdVendida" data-id="${p.id}" value="${p.quantidadeVendida || ''}"></div>
-            <div class="field"><label>Preço de venda (un.)</label><input type="number" min="0" step="any" data-role="precoVenda" data-id="${p.id}" value="${p.precoVendaUnitario || ''}"></div>
-            <div class="field"><label>Data da venda</label><input type="date" data-role="dataVenda" data-id="${p.id}" value="${p.dataVenda || p.data}"></div>
-          </div>
-          <div style="display:grid;grid-template-columns:repeat(4,minmax(130px,1fr));gap:8px;">
-            <div class="recipe-price-row"><span>Custo total</span><b>${m.custoRegistrado ? formatMoney(m.custoTotal) : 'Não registrado'}</b></div>
-            <div class="recipe-price-row"><span>Custo vendido</span><b>${m.custoRegistrado ? formatMoney(m.custoVendido) : '—'}</b></div>
-            <div class="recipe-price-row"><span>Faturamento</span><b>${formatMoney(m.faturamento)}</b></div>
-            <div class="recipe-price-row"><span>Lucro (${formatNumber(m.margemLucro, 1)}%)</span><b>${formatMoney(m.lucro)}</b></div>
-          </div>
-          ${movimentos.length ? `<div style="margin-top:12px;"><strong style="font-size:13px;">Movimentações do produto pronto</strong>${movimentos.sort((a,b) => b.criadoEm-a.criadoEm).map((mov) => `<div class="recipe-price-row"><span>${escapeHtml(mov.tipo)} · ${formatDateBR(mov.data)}${mov.observacoes ? ' — ' + escapeHtml(mov.observacoes) : ''}</span><b>-${formatNumber(mov.quantidade, 0)} un. <button class="btn btn-sm btn-icon btn-danger" data-action="excluir-movimento-pronto" data-id="${mov.id}" title="Excluir movimentação">${ICONS.trash}</button></b></div>`).join('')}</div>` : '<div style="font-size:12px;opacity:.65;margin-top:10px;">Nenhuma movimentação registrada.</div>'}
-        </div>
-      </div>`;
+      </div>
+    `;
     }).join('');
-
-    list.querySelectorAll('[data-action="toggle-detalhes-producao"]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const row = list.querySelector(`.producao-item[data-id="${btn.dataset.id}"]`);
-        const detalhes = row.querySelector('[data-role="detalhes-producao"]');
-        const aberto = detalhes.style.display !== 'none';
-        detalhes.style.display = aberto ? 'none' : 'block';
-        btn.textContent = aberto ? 'Ver detalhes' : 'Ocultar detalhes';
-      });
-    });
-
-    document.getElementById('toggleFinalizadas').addEventListener('change', (e) => {
-      ocultarProducoesFinalizadas = e.target.checked;
-      renderProducaoLista();
-    });
 
     list.querySelectorAll('[data-role="qtdVendida"], [data-role="precoVenda"], [data-role="dataVenda"]').forEach((inp) => {
       inp.addEventListener('change', (e) => {
@@ -3240,9 +2092,7 @@
       bodyHTML: `
         <div class="form-grid cols-3">
           <div class="field"><label>Receita</label><select id="epReceita">${db.recipes.map((r) => `<option value="${r.id}" ${r.id === production.receitaId ? 'selected' : ''}>${escapeHtml(r.nome)}</option>`).join('')}</select></div>
-          <div class="field"><label>Quantidade de receitas feitas</label><input type="number" min="0.01" step="any" id="epQuantidadeReceitas" value="${production.quantidadeReceitas || 1}"></div>
-          <div class="field"><label>Rendimento real (unidades)</label><input type="number" min="1" step="any" id="epQuantidade" value="${production.quantidadeProduzida}"></div>
-          <div class="field"><label>Peso por unidade (g)</label><input type="number" min="0" step="any" id="epPesoUnitario" value="${production.pesoUnitario || ''}"></div>
+          <div class="field"><label>Quantidade produzida</label><input type="number" min="1" step="any" id="epQuantidade" value="${production.quantidadeProduzida}"></div>
           <div class="field"><label>Data</label><input type="date" id="epData" value="${production.data}"></div>
           <div class="field span-2"><label>Observações</label><input type="text" id="epObs" value="${escapeHtml(production.observacoes || '')}"></div>
         </div>
@@ -3257,9 +2107,7 @@
         document.getElementById('saveEditProductionBtn').addEventListener('click', () => {
           const data = {
             receitaId: document.getElementById('epReceita').value,
-            quantidadeReceitas: document.getElementById('epQuantidadeReceitas').value,
             quantidadeProduzida: document.getElementById('epQuantidade').value,
-            pesoUnitario: document.getElementById('epPesoUnitario').value,
             data: document.getElementById('epData').value,
             observacoes: document.getElementById('epObs').value,
           };
@@ -3347,13 +2195,8 @@
   // produzida e número de produções usam a data da PRODUÇÃO (entram todas,
   // vendidas ou não).
   function getFinanceiroData(period, customFrom, customTo) {
-    const comprasNoPeriodo = db.purchases.filter((p) => p.considerarFinanceiro !== false && isDateInPeriod(p.dataCompra, period, customFrom, customTo));
-    const comprasMateriaisNoPeriodo = getMaterialPurchases().filter((p) => p.considerarFinanceiro !== false && isDateInPeriod(p.dataCompra, period, customFrom, customTo));
-    const investimentosNoPeriodo = getInvestments().filter((x) => isDateInPeriod(x.dataCompra, period, customFrom, customTo));
-    const totalGastoCompras = comprasNoPeriodo.reduce((s, p) => s + (Number(p.valorTotal) || 0), 0)
-      + comprasMateriaisNoPeriodo.reduce((s, p) => s + (Number(p.valorTotal) || 0), 0);
-    const totalInvestimentos = investimentosNoPeriodo.reduce((s, x) => s + (Number(x.valor) || 0), 0);
-    const desembolsoTotal = totalGastoCompras + totalInvestimentos;
+    const comprasNoPeriodo = db.purchases.filter((p) => isDateInPeriod(p.dataCompra, period, customFrom, customTo));
+    const totalGastoCompras = comprasNoPeriodo.reduce((s, p) => s + (Number(p.valorTotal) || 0), 0);
 
     const producoesPorData = db.productions.filter((p) => isDateInPeriod(p.data, period, customFrom, customTo));
     const quantidadeProduzidaTotal = producoesPorData.reduce((s, p) => s + (Number(p.quantidadeProduzida) || 0), 0);
@@ -3367,26 +2210,8 @@
       custoVendasTotal += m.custoVendido;
       quantidadeVendidaTotal += Number(p.quantidadeVendida) || 0;
     });
-    const caixasComVenda = getMixedBoxes().filter((b) => (Number(b.quantidadeVendida) || 0) > 0 && isDateInPeriod(b.dataVenda, period, customFrom, customTo));
-    caixasComVenda.forEach((b) => {
-      const m = computeMixedBoxMetrics(b);
-      faturamentoTotal += m.faturamento;
-      custoVendasTotal += m.custoVendido;
-      quantidadeVendidaTotal += Number(b.quantidadeVendida) || 0;
-    });
-    const gastosSuprimentosPorCategoria = {};
-    comprasMateriaisNoPeriodo.forEach((p) => {
-      const material = getMaterial(p.materialId);
-      const categoria = material && material.categoria ? material.categoria : 'Embalagens';
-      gastosSuprimentosPorCategoria[categoria] = (gastosSuprimentosPorCategoria[categoria] || 0) + (Number(p.valorTotal) || 0);
-    });
-    const totalGastoIngredientes = comprasNoPeriodo.reduce((s, p) => s + (Number(p.valorTotal) || 0), 0);
-    const totalGastoSuprimentos = comprasMateriaisNoPeriodo.reduce((s, p) => s + (Number(p.valorTotal) || 0), 0);
-
     const lucroTotal = faturamentoTotal - custoVendasTotal;
-    const resultadoCaixaPeriodo = faturamentoTotal - desembolsoTotal;
-    const numeroVendas = producoesComVenda.length + caixasComVenda.length;
-    const ticketMedio = numeroVendas > 0 ? faturamentoTotal / numeroVendas : 0;
+    const ticketMedio = producoesComVenda.length > 0 ? faturamentoTotal / producoesComVenda.length : 0;
 
     const porReceita = {};
     producoesPorData.forEach((p) => { porReceita[p.receitaNome] = (porReceita[p.receitaNome] || 0) + (Number(p.quantidadeProduzida) || 0); });
@@ -3401,9 +2226,9 @@
     });
 
     return {
-      totalGastoCompras, totalGastoIngredientes, totalGastoSuprimentos, totalInvestimentos, desembolsoTotal, gastosSuprimentosPorCategoria, faturamentoTotal, custoVendasTotal, lucroTotal, resultadoCaixaPeriodo, quantidadeVendidaTotal,
+      totalGastoCompras, faturamentoTotal, custoVendasTotal, lucroTotal, quantidadeVendidaTotal,
       quantidadeProduzidaTotal, numeroProducoes, ticketMedio, receitaMaisProduzida, ingredienteMaisGasto,
-      temDados: numeroProducoes > 0 || comprasNoPeriodo.length > 0 || comprasMateriaisNoPeriodo.length > 0 || investimentosNoPeriodo.length > 0 || getMixedBoxes().length > 0,
+      temDados: numeroProducoes > 0 || comprasNoPeriodo.length > 0,
       producoesListadas: [...producoesPorData].sort((a, b) => b.criadoEm - a.criadoEm),
     };
   }
@@ -3411,9 +2236,6 @@
   function renderFinanceiro() {
     const container = document.getElementById('financeiroContainer');
     const data = getFinanceiroData(currentFinanceiroPeriodo, financeiroPeriodoCustomFrom, financeiroPeriodoCustomTo);
-    const dadosGerais = getFinanceiroData('personalizado', '', '');
-    const saldoInicial = Number(db.settings.saldoInicial) || 0;
-    const saldoAtualEstimado = saldoInicial + dadosGerais.faturamentoTotal - dadosGerais.desembolsoTotal;
 
     container.innerHTML = `
       <div class="calc-tabs" id="financeiroPeriodoTabs">
@@ -3425,44 +2247,17 @@
         <button class="calc-tab ${currentFinanceiroPeriodo === 'personalizado' ? 'active' : ''}" data-action="financeiro-periodo" data-periodo="personalizado">Personalizado</button>
       </div>
       ${currentFinanceiroPeriodo === 'personalizado' ? `
-        <div class="form-grid cols-3" style="margin-bottom:16px; align-items:end;">
+        <div class="form-grid cols-3" style="margin-bottom:16px;">
           <div class="field"><label>De</label><input type="date" id="financeiroPeriodoDe" value="${financeiroPeriodoCustomFrom}"></div>
           <div class="field"><label>Até</label><input type="date" id="financeiroPeriodoAte" value="${financeiroPeriodoCustomTo}"></div>
-          <div class="field"><button type="button" class="btn btn-primary" id="aplicarFinanceiroPeriodoBtn">Aplicar período</button></div>
         </div>
       ` : ''}
 
-      <div class="panel" style="margin-bottom:18px;">
-        <div style="display:flex; gap:14px; align-items:end; flex-wrap:wrap;">
-          <div class="field" style="min-width:220px; flex:1;">
-            <label>Saldo inicial do caixa</label>
-            <input type="number" min="0" step="0.01" id="saldoInicialCaixaInput" value="${saldoInicial}">
-          </div>
-          <button type="button" class="btn btn-primary" id="salvarSaldoInicialBtn">Salvar saldo inicial</button>
-          <p class="confirm-text" style="margin:0; flex-basis:100%;">Use o valor que já existia no caixa antes dos registros do sistema.</p>
-        </div>
-      </div>
-
       <div class="dash-grid" style="margin-bottom:22px;">
-        <div class="stat-card tone-success">
-          <div class="stat-icon">${ICONS.calc}</div>
-          <div class="stat-value">${formatMoney(saldoAtualEstimado)}</div>
-          <div class="stat-label">Saldo atual estimado</div>
-        </div>
-        <div class="stat-card ${data.resultadoCaixaPeriodo >= 0 ? 'tone-success' : 'tone-warn'}">
-          <div class="stat-icon">${ICONS.starFilled}</div>
-          <div class="stat-value">${formatMoney(data.resultadoCaixaPeriodo)}</div>
-          <div class="stat-label">Resultado do período</div>
-        </div>
         <div class="stat-card tone-warn">
           <div class="stat-icon">${ICONS.cart}</div>
           <div class="stat-value">${formatMoney(data.totalGastoCompras)}</div>
-          <div class="stat-label">Gastos operacionais</div>
-        </div>
-        <div class="stat-card tone-primary">
-          <div class="stat-icon">${ICONS.starFilled}</div>
-          <div class="stat-value">${formatMoney(data.totalInvestimentos)}</div>
-          <div class="stat-label">Investimentos</div>
+          <div class="stat-label">Total gasto em compras</div>
         </div>
         <div class="stat-card tone-success">
           <div class="stat-icon">${ICONS.box}</div>
@@ -3504,15 +2299,7 @@
       <div class="panel" style="margin-bottom:26px;">
         <h3>${ICONS.calc} Resumo · ${FINANCEIRO_PERIODO_LABELS[currentFinanceiroPeriodo]}</h3>
         ${!data.temDados ? `<p class="confirm-text">Sem dados no período.</p>` : `
-          <div class="mini-row"><span class="name">Saldo inicial cadastrado</span><span class="value">${formatMoney(saldoInicial)}</span></div>
-          <div class="mini-row"><span class="name">Saldo atual estimado</span><span class="value">${formatMoney(saldoAtualEstimado)}</span></div>
-          <div class="mini-row"><span class="name">Resultado de caixa do período</span><span class="value">${formatMoney(data.resultadoCaixaPeriodo)}</span></div>
-          <div class="mini-row"><span class="name">Gastos operacionais</span><span class="value">${formatMoney(data.totalGastoCompras)}</span></div>
-          <div class="mini-row"><span class="name">Investimentos e equipamentos</span><span class="value">${formatMoney(data.totalInvestimentos)}</span></div>
-          <div class="mini-row"><span class="name">Desembolso total</span><span class="value">${formatMoney(data.desembolsoTotal)}</span></div>
-          <div class="mini-row"><span class="name">Ingredientes</span><span class="value">${formatMoney(data.totalGastoIngredientes)}</span></div>
-          <div class="mini-row"><span class="name">Suprimentos</span><span class="value">${formatMoney(data.totalGastoSuprimentos)}</span></div>
-          ${Object.entries(data.gastosSuprimentosPorCategoria).sort((a, b) => b[1] - a[1]).map(([categoria, valor]) => `<div class="mini-row"><span class="name">↳ ${escapeHtml(categoria)}</span><span class="value">${formatMoney(valor)}</span></div>`).join('')}
+          <div class="mini-row"><span class="name">Total gasto em compras</span><span class="value">${formatMoney(data.totalGastoCompras)}</span></div>
           <div class="mini-row"><span class="name">Total faturado</span><span class="value">${formatMoney(data.faturamentoTotal)}</span></div>
           <div class="mini-row"><span class="name">Custo das vendas</span><span class="value">${formatMoney(data.custoVendasTotal)}</span></div>
           <div class="mini-row"><span class="name">Lucro estimado</span><span class="value">${formatMoney(data.lucroTotal)}</span></div>
@@ -3528,45 +2315,14 @@
       <div class="producoes-list" id="financeiroProducoesList"></div>
     `;
 
-    document.getElementById('salvarSaldoInicialBtn').addEventListener('click', () => {
-      const valor = Number(document.getElementById('saldoInicialCaixaInput').value);
-      if (!Number.isFinite(valor) || valor < 0) {
-        toast('Informe um saldo inicial válido.', 'danger');
-        return;
-      }
-      db.settings.saldoInicial = valor;
-      saveDB();
-      renderFinanceiro();
-      toast('Saldo inicial atualizado.', 'success');
-    });
-
     if (currentFinanceiroPeriodo === 'personalizado') {
       const applyRange = () => {
-        const fromInput = document.getElementById('financeiroPeriodoDe');
-        const toInput = document.getElementById('financeiroPeriodoAte');
-        const from = fromInput.value;
-        const to = toInput.value;
-
-        if (!from || !to) {
-          toast('Preencha as duas datas para aplicar o período.', 'warning');
-          return;
-        }
-        if (from > to) {
-          toast('A data inicial não pode ser posterior à data final.', 'danger');
-          return;
-        }
-
-        financeiroPeriodoCustomFrom = from;
-        financeiroPeriodoCustomTo = to;
+        financeiroPeriodoCustomFrom = document.getElementById('financeiroPeriodoDe').value;
+        financeiroPeriodoCustomTo = document.getElementById('financeiroPeriodoAte').value;
         renderFinanceiro();
       };
-
-      document.getElementById('aplicarFinanceiroPeriodoBtn').addEventListener('click', applyRange);
-      ['financeiroPeriodoDe', 'financeiroPeriodoAte'].forEach((id) => {
-        document.getElementById(id).addEventListener('keydown', (e) => {
-          if (e.key === 'Enter') applyRange();
-        });
-      });
+      document.getElementById('financeiroPeriodoDe').addEventListener('change', applyRange);
+      document.getElementById('financeiroPeriodoAte').addEventListener('change', applyRange);
     }
 
     const list = document.getElementById('financeiroProducoesList');
@@ -3581,7 +2337,7 @@
       <div class="producao-item">
         <div class="info">
           <strong>${escapeHtml(p.receitaNome)} <span class="tag-badge tag-${status.level}">${status.label}</span></strong>
-          <div>${formatDateBR(p.data)} · ${formatNumber(p.quantidadeReceitas || 1, 2)} receita(s) · ${formatNumber(p.quantidadeProduzida, 0)} produzidas${p.pesoUnitario ? ` de ${formatNumber(p.pesoUnitario, 0)} g` : ''} · ${formatNumber(p.quantidadeVendida || 0, 0)} vendidas · ${formatNumber(m.quantidadeRestante, 0)} restantes</div>
+          <div>${formatDateBR(p.data)} · ${formatNumber(p.quantidadeProduzida, 0)} produzidas · ${formatNumber(p.quantidadeVendida || 0, 0)} vendidas · ${formatNumber(m.quantidadeRestante, 0)} restantes</div>
         </div>
         <div style="flex:1; min-width:220px;">
           ${!m.custoRegistrado ? `<div class="recipe-price-row"><span>Custo</span><b>Custo não registrado</b></div>` : `
@@ -3737,54 +2493,6 @@
       case 'novo-ingrediente':
         openIngredientModal(null);
         break;
-      case 'estoque-tab':
-        currentEstoqueTab = el.dataset.tab || 'controlados';
-        renderEstoque();
-        break;
-      case 'novo-investimento':
-        openInvestmentModal(null);
-        break;
-      case 'editar-investimento':
-        openInvestmentModal(id);
-        break;
-      case 'excluir-investimento':
-        openConfirm({
-          title: 'Excluir investimento',
-          message: 'Deseja excluir este investimento do histórico financeiro?',
-          confirmLabel: 'Excluir',
-          danger: true,
-          onConfirm: () => { deleteInvestment(id); renderAll(); toast('Investimento excluído.', 'success'); },
-        });
-        break;
-      case 'novo-material':
-        openMaterialModal();
-        break;
-      case 'editar-material':
-        openMaterialModal(id);
-        break;
-      case 'comprar-material':
-        openMaterialPurchaseModal(id);
-        break;
-      case 'ver-compras-material':
-        openMaterialPurchasesModal(id);
-        break;
-      case 'editar-compra-material': {
-        const materialId = el.dataset.materialId;
-        openMaterialPurchaseModal(materialId, id);
-        break;
-      }
-      case 'usar-material':
-        openMaterialUseModal(id);
-        break;
-      case 'excluir-material':
-        openConfirm({
-          title: 'Excluir suprimento',
-          message: 'Isso apagará também o histórico de compras e baixas deste suprimento.',
-          confirmLabel: 'Excluir',
-          danger: true,
-          onConfirm: () => { deleteMaterial(id); renderAll(); toast('Suprimento excluído.', 'success'); },
-        });
-        break;
       case 'editar-ingrediente':
         openIngredientModal(id);
         break;
@@ -3837,15 +2545,6 @@
         renderCalcForm();
         break;
       }
-      case 'remover-linha-caixa-mista': {
-        const rowId = el.dataset.row;
-        if (!window.__mixedBoxFormDraft) window.__mixedBoxFormDraft = {};
-        [['mbNome','nome'],['mbQuantidadeCaixas','quantidadeCaixas'],['mbEmbalagem','embalagem'],['mbPreco','preco'],['mbData','data'],['mbObs','observacoes']].forEach(([domId,key]) => { const node = document.getElementById(domId); if (node) window.__mixedBoxFormDraft[key] = node.value; });
-        window.__mixedBoxDraft = (window.__mixedBoxDraft || []).filter((i) => i.rowId !== rowId);
-        if (!window.__mixedBoxDraft.length && db.recipes.length) window.__mixedBoxDraft = [{ rowId: uid(), receitaId: db.recipes[0].id, quantidadePorCaixa: 1 }];
-        renderMixedBoxForm();
-        break;
-      }
       case 'calc-tab':
         currentCalcTab = el.dataset.tipo;
         currentCaixaItems = [];
@@ -3878,12 +2577,6 @@
         if (currentFinanceiroPeriodo !== 'personalizado') { financeiroPeriodoCustomFrom = ''; financeiroPeriodoCustomTo = ''; }
         renderFinanceiro();
         break;
-      case 'movimentar-produto-pronto':
-        openReadyProductMovementModal(id);
-        break;
-      case 'excluir-movimento-pronto':
-        openConfirm({ title: 'Excluir movimentação', message: 'A quantidade voltará ao estoque disponível desta produção.', confirmLabel: 'Excluir', danger: true, onConfirm: () => { deleteReadyProductMovement(id); renderAll(); toast('Movimentação excluída e estoque restaurado.', 'success'); } });
-        break;
       case 'editar-producao':
         openEditProductionModal(id);
         break;
@@ -3893,23 +2586,7 @@
           message: 'Deseja realmente excluir este registro de produção? O estoque consumido será devolvido automaticamente aos mesmos lotes de origem.',
           confirmLabel: 'Excluir',
           danger: true,
-          onConfirm: () => {
-            const result = deleteProduction(id);
-            if (!result.ok) { toast(result.message, 'danger'); return; }
-            renderAll(); toast('Produção excluída e estoque estornado.', 'success');
-          },
-        });
-        break;
-      case 'editar-caixa-mista':
-        openEditMixedBoxModal(id);
-        break;
-      case 'excluir-caixa-mista':
-        openConfirm({
-          title: 'Excluir caixa montada',
-          message: 'Ao excluir, os brigadeiros voltarão automaticamente para o estoque de produtos prontos.',
-          confirmLabel: 'Excluir',
-          danger: true,
-          onConfirm: () => { deleteMixedBox(id); renderAll(); toast('Caixa excluída e brigadeiros devolvidos ao estoque pronto.', 'success'); },
+          onConfirm: () => { deleteProduction(id); renderAll(); toast('Produção excluída e estoque estornado.', 'success'); },
         });
         break;
       default:
@@ -3958,8 +2635,7 @@
     }
     migrateProductions();
     hideAuthGate();
-    const ultimaTela = localStorage.getItem('doceGestaoUltimaTela') || currentView || 'dashboard';
-    goToView(VIEW_TITLES[ultimaTela] ? ultimaTela : 'dashboard');
+    goToView('dashboard');
   }
 
   if (!SUPABASE_CONFIGURADO) {
