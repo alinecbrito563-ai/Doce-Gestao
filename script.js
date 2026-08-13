@@ -2216,10 +2216,13 @@
         <h2 class="section-title" style="margin-top:22px; font-size:15px;">Lotes já registrados</h2>
         <div class="modal-sub-list" id="purchaseListArea"></div>
       `,
-      onMount: () => {
-        const quantidadeInput = document.getElementById('pQuantidade');
-        const valorTotalInput = document.getElementById('pValorTotal');
-        const valorUnitarioInput = document.getElementById('pValorUnitario');
+      onMount: (box) => {
+        // Usar os campos dentro do próprio modal evita conflito com os mesmos
+        // IDs existentes na tela de Produção.
+        const field = (id) => box.querySelector(`#${id}`);
+        const quantidadeInput = field('pQuantidade');
+        const valorTotalInput = field('pValorTotal');
+        const valorUnitarioInput = field('pValorUnitario');
 
         const recalc = () => {
           const quantidade = quantidadeInput.valueAsNumber;
@@ -2238,15 +2241,15 @@
         valorTotalInput.addEventListener('change', recalc);
         setTimeout(recalc, 0);
         renderList();
-        document.getElementById('savePurchaseBtn').addEventListener('click', () => {
+        field('savePurchaseBtn').addEventListener('click', () => {
           const data = {
-            marca: document.getElementById('pMarca').value,
-            quantidade: document.getElementById('pQuantidade').value,
-            valorTotal: document.getElementById('pValorTotal').value,
-            validade: document.getElementById('pValidade').value,
-            dataCompra: document.getElementById('pData').value,
-            considerarFinanceiro: document.getElementById('pConsiderarFinanceiro').checked,
-            origem: document.getElementById('pOrigem').value,
+            marca: field('pMarca').value,
+            quantidade: field('pQuantidade').value,
+            valorTotal: field('pValorTotal').value,
+            validade: field('pValidade').value,
+            dataCompra: field('pData').value,
+            considerarFinanceiro: field('pConsiderarFinanceiro').checked,
+            origem: field('pOrigem').value,
           };
           if ((!editing && (!data.quantidade || Number(data.quantidade) <= 0))) { toast('Informe uma quantidade válida.', 'danger'); return; }
           if (Number(data.valorTotal) < 0) { toast('O valor total não pode ser negativo.', 'danger'); return; }
