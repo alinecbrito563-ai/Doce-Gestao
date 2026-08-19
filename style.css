@@ -1,6 +1,6 @@
 /* =========================================================================
-   DoceGestão — Design tokens
-   Paleta: creme baunilha + vinho de frutas vermelhas + caramelo dourado.
+   De Mãe em Mãos — Design tokens
+   Paleta: creme baunilha + terracota + caramelo dourado.
    Tipografia: serifada (Georgia) para títulos "de cardápio", sans para corpo.
    Assinatura: "etiqueta de preço" (tag-badge) com recorte em clip-path,
    usada nos status de estoque/validade — remete a etiquetas de confeitaria.
@@ -14,9 +14,9 @@
   --ink: #3B2A2E;
   --ink-soft: #5E484C;
   --muted: #93797E;
-  --primary: #8E3B5C;
-  --primary-dark: #6E2C48;
-  --primary-soft: #F7E4EC;
+  --primary: #78462D;
+  --primary-dark: #5C3623;
+  --primary-soft: #F2EFE9;
   --gold: #BE8536;
   --gold-soft: #F7EBD6;
   --success: #4C8B67;
