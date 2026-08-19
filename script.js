@@ -3626,17 +3626,6 @@
         </div>
       </div>
 
-      <div class="panel" style="margin-bottom:18px;">
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
-          <h3 style="margin:0;">${ICONS.cart} Saídas manuais</h3>
-          <button class="btn btn-primary btn-sm" data-action="nova-saida-manual">${ICONS.plus} Registrar saída</button>
-        </div>
-        <p class="confirm-text" style="margin:6px 0 10px;">Use para dinheiro que saiu do caixa sem vir de uma compra cadastrada (ex.: repor algo emprestado).</p>
-        ${data.saidasManuaisNoPeriodo.length ? data.saidasManuaisNoPeriodo.map((s) => `
-          <div class="mini-row"><span class="name">${escapeHtml(s.motivo)} · ${formatDateBR(s.data)}</span><span class="value">${formatMoney(s.valor)} <button class="btn btn-sm btn-icon" data-action="editar-saida-manual" data-id="${s.id}" title="Editar">${ICONS.edit}</button> <button class="btn btn-sm btn-icon btn-danger" data-action="excluir-saida-manual" data-id="${s.id}" title="Excluir">${ICONS.trash}</button></span></div>
-        `).join('') : `<p class="confirm-text">Nenhuma saída manual registrada neste período.</p>`}
-      </div>
-
       <div class="dash-grid" style="margin-bottom:22px;">
         <div class="stat-card tone-success">
           <div class="stat-icon">${ICONS.calc}</div>
@@ -3698,6 +3687,17 @@
           <div class="stat-value">${formatMoney(data.ticketMedio)}</div>
           <div class="stat-label">Ticket médio</div>
         </div>
+      </div>
+
+      <div class="panel" style="margin-bottom:18px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
+          <h3 style="margin:0;">${ICONS.cart} Saídas manuais</h3>
+          <button class="btn btn-primary btn-sm" data-action="nova-saida-manual">${ICONS.plus} Registrar saída</button>
+        </div>
+        <p class="confirm-text" style="margin:6px 0 10px;">Use para dinheiro que saiu do caixa sem vir de uma compra cadastrada (ex.: repor algo emprestado).</p>
+        ${data.saidasManuaisNoPeriodo.length ? data.saidasManuaisNoPeriodo.map((s) => `
+          <div class="mini-row"><span class="name">${escapeHtml(s.motivo)} · ${formatDateBR(s.data)}</span><span class="value">${formatMoney(s.valor)} <button class="btn btn-sm btn-icon" data-action="editar-saida-manual" data-id="${s.id}" title="Editar">${ICONS.edit}</button> <button class="btn btn-sm btn-icon btn-danger" data-action="excluir-saida-manual" data-id="${s.id}" title="Excluir">${ICONS.trash}</button></span></div>
+        `).join('') : `<p class="confirm-text">Nenhuma saída manual registrada neste período.</p>`}
       </div>
 
       <div class="panel" style="margin-bottom:26px;">
