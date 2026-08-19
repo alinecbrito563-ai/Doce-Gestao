@@ -70,7 +70,7 @@
       productions: [],
       movements: [],
       calculations: [],
-      settings: { multiplicador: 3, saldoInicial: 0, caixasMistas: [], materiais: [], comprasMateriais: [], movimentosMateriais: [], investimentos: [], movimentosProdutosProntos: [] },
+      settings: { multiplicador: 3, saldoInicial: 0, caixasMistas: [], materiais: [], comprasMateriais: [], movimentosMateriais: [], investimentos: [], movimentosProdutosProntos: [], saidasManuais: [] },
     };
   }
 
@@ -114,7 +114,7 @@
     tabelaResults.forEach((r) => { if (r.error) throw r.error; });
     const settingsRes = await sb.from('user_settings').select('payload').eq('user_id', userId).maybeSingle();
     if (settingsRes.error) throw settingsRes.error;
-    const loaded = { settings: (settingsRes.data && settingsRes.data.payload) ? settingsRes.data.payload : { multiplicador: 3, saldoInicial: 0, caixasMistas: [], materiais: [], comprasMateriais: [], movimentosMateriais: [], investimentos: [], movimentosProdutosProntos: [] } };
+    const loaded = { settings: (settingsRes.data && settingsRes.data.payload) ? settingsRes.data.payload : { multiplicador: 3, saldoInicial: 0, caixasMistas: [], materiais: [], comprasMateriais: [], movimentosMateriais: [], investimentos: [], movimentosProdutosProntos: [], saidasManuais: [] } };
     TABELAS.forEach((t, i) => { loaded[t] = (tabelaResults[i].data || []).map((r) => r.payload); });
     return Object.assign(defaultDB(), loaded);
   }
@@ -691,6 +691,67 @@
     return mov;
   }
 
+  // Indica se uma movimentação pode ser editada pela tela de Movimentações.
+  // Compra, Produção e Estorno têm fluxos próprios (edição de compra, edição
+  // de produção, e estorno automático) e não devem ser editados por aqui.
+  function canEditMovement(mov) {
+    const editableTypes = ['Consumo pessoal', 'Degustação', 'Perda', 'Ajuste manual'];
+    return !!mov && editableTypes.indexOf(mov.tipo) !== -1;
+  }
+
+  // Corrige uma movimentação de baixa/ajuste já registrada (quantidade, data
+  // e descrição). Como o sistema não guarda, por movimentação, exatamente
+  // quais lotes de compra foram debitados (isso só existe para Produções),
+  // a correção é feita pela DIFERENÇA entre a quantidade antiga e a nova:
+  //   - se a baixa diminuiu, a diferença volta ao estoque como um lote de
+  //     correção (mesma técnica já usada em addAdjustment para ajustes
+  //     positivos), sem afetar o Financeiro;
+  //   - se a baixa aumentou, a diferença é retirada do estoque atual via
+  //     FIFO normal (mesmo motor usado em qualquer consumo do sistema).
+  function updateMovement(id, data) {
+    const mov = db.movements.find((m) => m.id === id);
+    if (!mov) return { ok: false, message: 'Movimentação não encontrada.' };
+    if (!canEditMovement(mov)) return { ok: false, message: 'Este tipo de movimentação não pode ser editado.' };
+    const ing = getIngredient(mov.ingredienteId);
+    if (!ing) return { ok: false, message: 'Ingrediente não encontrado.' };
+
+    const quantidadeInformada = Number(data.quantidade);
+    if (!Number.isFinite(quantidadeInformada) || quantidadeInformada <= 0) {
+      return { ok: false, message: 'Informe uma quantidade válida.' };
+    }
+
+    const sign = mov.quantidadeBase < 0 ? -1 : 1;
+    const novaQuantidadeBase = sign * toBase(quantidadeInformada, ing.unidade);
+    const deltaBase = novaQuantidadeBase - mov.quantidadeBase;
+
+    if (Math.abs(deltaBase) > EPS) {
+      if (deltaBase < 0) {
+        // a baixa aumentou: precisa retirar mais estoque
+        const result = planConsumption(mov.ingredienteId, Math.abs(deltaBase));
+        if (!result.ok) {
+          return { ok: false, message: `Estoque insuficiente para aumentar esta baixa. Faltam ${formatQuantityBase(result.faltanteBase, ing.unidade)}.` };
+        }
+        applyConsumptionPlan(result.plan);
+      } else {
+        // a baixa diminuiu: devolve a diferença ao estoque como um lote de correção
+        const avgPrice = getAvgPricePerBase(mov.ingredienteId);
+        db.purchases.push({
+          id: uid(), ingredienteId: mov.ingredienteId, marca: 'Correção de movimentação',
+          quantidade: fromBase(deltaBase, ing.unidade), quantidadeBase: deltaBase, quantidadeRestanteBase: deltaBase,
+          valorTotal: avgPrice * deltaBase, valorUnitario: avgPrice * (UNIT_BASE_FACTOR[ing.unidade] || 1),
+          considerarFinanceiro: false, origem: 'Correção de movimentação',
+          validade: '', dataCompra: todayISO(), criadoEm: Date.now(),
+        });
+      }
+    }
+
+    mov.quantidadeBase = novaQuantidadeBase;
+    mov.data = data.data || mov.data;
+    if (data.descricao !== undefined) mov.descricao = data.descricao;
+    saveDB();
+    return { ok: true };
+  }
+
   /* ======================================================================
      8. RECEITAS
      ====================================================================== */
@@ -772,7 +833,7 @@
   //     nunca um número inventado.
   function migrateProductions() {
     let changed = false;
-    if (!db.settings) { db.settings = { multiplicador: 3, saldoInicial: 0, caixasMistas: [], materiais: [], comprasMateriais: [], movimentosMateriais: [], investimentos: [], movimentosProdutosProntos: [] }; changed = true; }
+    if (!db.settings) { db.settings = { multiplicador: 3, saldoInicial: 0, caixasMistas: [], materiais: [], comprasMateriais: [], movimentosMateriais: [], investimentos: [], movimentosProdutosProntos: [], saidasManuais: [] }; changed = true; }
     if (typeof db.settings.saldoInicial !== 'number') { db.settings.saldoInicial = Number(db.settings.saldoInicial) || 0; changed = true; }
     if (!Array.isArray(db.settings.caixasMistas)) { db.settings.caixasMistas = []; changed = true; }
     if (!Array.isArray(db.settings.movimentosProdutosProntos)) { db.settings.movimentosProdutosProntos = []; changed = true; }
@@ -780,6 +841,7 @@
     if (!Array.isArray(db.settings.comprasMateriais)) { db.settings.comprasMateriais = []; changed = true; }
     if (!Array.isArray(db.settings.movimentosMateriais)) { db.settings.movimentosMateriais = []; changed = true; }
     if (!Array.isArray(db.settings.investimentos)) { db.settings.investimentos = []; changed = true; }
+    if (!Array.isArray(db.settings.saidasManuais)) { db.settings.saidasManuais = []; changed = true; }
     db.purchases.forEach((p) => {
       if (typeof p.considerarFinanceiro !== 'boolean') { p.considerarFinanceiro = true; changed = true; }
       if (!p.origem) { p.origem = p.considerarFinanceiro ? 'Compra' : 'Estoque inicial'; changed = true; }
@@ -1718,6 +1780,66 @@
         closeModal();
         renderAll();
         toast(editing ? 'Investimento atualizado.' : 'Investimento registrado no Financeiro.', 'success');
+      }),
+    });
+  }
+
+  /* ======================================================================
+     9.3 SAÍDAS MANUAIS (FINANCEIRO)
+     Registros de saída de dinheiro que não vieram de uma compra cadastrada
+     (ex.: repor algo que era emprestado). Afeta APENAS o Financeiro — não
+     altera estoque, compras, receitas ou produção.
+     ====================================================================== */
+
+  function getManualExpenses() {
+    if (!db.settings) db.settings = {};
+    if (!Array.isArray(db.settings.saidasManuais)) db.settings.saidasManuais = [];
+    return db.settings.saidasManuais;
+  }
+
+  function addManualExpense(data) {
+    const motivo = String(data.motivo || '').trim();
+    const valor = Number(data.valor) || 0;
+    if (!motivo) return { ok: false, message: 'Informe o motivo da saída.' };
+    if (valor <= 0) return { ok: false, message: 'Informe um valor maior que zero.' };
+    const record = {
+      id: uid(),
+      motivo,
+      valor,
+      data: data.data || todayISO(),
+      criadoEm: Date.now(),
+    };
+    getManualExpenses().push(record);
+    saveDB();
+    return { ok: true, saida: record };
+  }
+
+  function deleteManualExpense(id) {
+    db.settings.saidasManuais = getManualExpenses().filter((s) => s.id !== id);
+    saveDB();
+  }
+
+  function openManualExpenseModal() {
+    openModal({
+      title: 'Registrar saída manual',
+      bodyHTML: `
+        <div class="form-grid">
+          <div class="field span-2"><label>Motivo</label><input type="text" id="saidaMotivo" placeholder="Ex.: Reposição mãe"></div>
+          <div class="field"><label>Valor (R$)</label><input type="number" min="0.01" step="any" id="saidaValor" placeholder="0,00"></div>
+          <div class="field"><label>Data</label><input type="date" id="saidaData" value="${todayISO()}"></div>
+        </div>
+      `,
+      footerHTML: `<button class="btn btn-ghost" data-action="fechar-modal">Cancelar</button><button class="btn btn-primary" id="salvarSaidaManualBtn">Registrar saída</button>`,
+      onMount: () => document.getElementById('salvarSaidaManualBtn').addEventListener('click', () => {
+        const result = addManualExpense({
+          motivo: document.getElementById('saidaMotivo').value,
+          valor: document.getElementById('saidaValor').value,
+          data: document.getElementById('saidaData').value,
+        });
+        if (!result.ok) { toast(result.message, 'danger'); return; }
+        closeModal();
+        renderAll();
+        toast('Saída registrada.', 'success');
       }),
     });
   }
@@ -3312,6 +3434,7 @@
             const positive = m.quantidadeBase > 0;
             const iconClass = m.tipo === 'Compra' || m.tipo === 'Estorno' ? 'in' : (m.tipo === 'Ajuste manual' ? 'neutral' : 'out');
             const iconSvg = m.tipo === 'Compra' ? ICONS.cart : m.tipo === 'Produção' ? ICONS.factory : m.tipo === 'Estorno' ? ICONS.check : m.tipo === 'Ajuste manual' ? ICONS.edit : ICONS.move;
+            const editable = canEditMovement(m);
             return `
               <div class="statement-row">
                 <div class="statement-left">
@@ -3322,12 +3445,47 @@
                   </div>
                 </div>
                 <div class="statement-amount ${positive ? 'pos' : 'neg'}">${positive ? '+' : ''}${formatQuantityBase(m.quantidadeBase, ing ? ing.unidade : 'unidade')}</div>
+                ${editable ? `<button class="btn btn-sm btn-icon" data-action="editar-movimentacao" data-id="${m.id}" title="Editar movimentação">${ICONS.edit}</button>` : ''}
               </div>
             `;
           }).join('')}
         </div>
       `;
     }).join('');
+  }
+
+  // Modal de correção de uma movimentação de baixa/ajuste já registrada.
+  // Só é chamado para tipos editáveis (ver canEditMovement).
+  function openEditMovementModal(id) {
+    const mov = db.movements.find((m) => m.id === id);
+    if (!mov) return;
+    if (!canEditMovement(mov)) { toast('Este tipo de movimentação não pode ser editado.', 'warning'); return; }
+    const ing = getIngredient(mov.ingredienteId);
+    if (!ing) { toast('Ingrediente não encontrado.', 'danger'); return; }
+    const quantidadeAtual = fromBase(Math.abs(mov.quantidadeBase), ing.unidade);
+    openModal({
+      title: `Editar movimentação — ${ing.nome}`,
+      bodyHTML: `
+        <div class="form-grid">
+          <div class="field"><label>Quantidade (${ing.unidade})</label><input type="number" min="0.01" step="any" id="emQuantidade" value="${quantidadeAtual}"></div>
+          <div class="field"><label>Data</label><input type="date" id="emData" value="${mov.data}"></div>
+          <div class="field span-2"><label>Descrição</label><input type="text" id="emDescricao" value="${escapeHtml(mov.descricao || '')}"></div>
+        </div>
+        <p class="confirm-text" style="margin-top:10px;">O estoque será ajustado automaticamente pela diferença entre a quantidade antiga e a nova.</p>
+      `,
+      footerHTML: `<button class="btn btn-ghost" data-action="fechar-modal">Cancelar</button><button class="btn btn-primary" id="salvarEdicaoMovimentacaoBtn">Salvar alterações</button>`,
+      onMount: () => document.getElementById('salvarEdicaoMovimentacaoBtn').addEventListener('click', () => {
+        const result = updateMovement(id, {
+          quantidade: document.getElementById('emQuantidade').value,
+          data: document.getElementById('emData').value,
+          descricao: document.getElementById('emDescricao').value,
+        });
+        if (!result.ok) { toast(result.message, 'danger'); return; }
+        closeModal();
+        renderAll();
+        toast('Movimentação corrigida.', 'success');
+      }),
+    });
   }
 
   /* ======================================================================
@@ -3348,15 +3506,17 @@
   // usam a data da COMPRA; faturamento/custo das vendas/lucro/ticket médio
   // usam a data da VENDA (só entram produções que já têm venda); quantidade
   // produzida e número de produções usam a data da PRODUÇÃO (entram todas,
-  // vendidas ou não).
+  // vendidas ou não); saídas manuais usam a data informada no registro.
   function getFinanceiroData(period, customFrom, customTo) {
     const comprasNoPeriodo = db.purchases.filter((p) => p.considerarFinanceiro !== false && isDateInPeriod(p.dataCompra, period, customFrom, customTo));
     const comprasMateriaisNoPeriodo = getMaterialPurchases().filter((p) => p.considerarFinanceiro !== false && isDateInPeriod(p.dataCompra, period, customFrom, customTo));
     const investimentosNoPeriodo = getInvestments().filter((x) => isDateInPeriod(x.dataCompra, period, customFrom, customTo));
+    const saidasManuaisNoPeriodo = getManualExpenses().filter((s) => isDateInPeriod(s.data, period, customFrom, customTo));
     const totalGastoCompras = comprasNoPeriodo.reduce((s, p) => s + (Number(p.valorTotal) || 0), 0)
       + comprasMateriaisNoPeriodo.reduce((s, p) => s + (Number(p.valorTotal) || 0), 0);
     const totalInvestimentos = investimentosNoPeriodo.reduce((s, x) => s + (Number(x.valor) || 0), 0);
-    const desembolsoTotal = totalGastoCompras + totalInvestimentos;
+    const totalSaidasManuais = saidasManuaisNoPeriodo.reduce((s, x) => s + (Number(x.valor) || 0), 0);
+    const desembolsoTotal = totalGastoCompras + totalInvestimentos + totalSaidasManuais;
 
     const producoesPorData = db.productions.filter((p) => isDateInPeriod(p.data, period, customFrom, customTo));
     const quantidadeProduzidaTotal = producoesPorData.reduce((s, p) => s + (Number(p.quantidadeProduzida) || 0), 0);
@@ -3404,9 +3564,9 @@
     });
 
     return {
-      totalGastoCompras, totalGastoIngredientes, totalGastoSuprimentos, totalInvestimentos, desembolsoTotal, gastosSuprimentosPorCategoria, faturamentoTotal, custoVendasTotal, lucroTotal, resultadoCaixaPeriodo, quantidadeVendidaTotal,
+      totalGastoCompras, totalGastoIngredientes, totalGastoSuprimentos, totalInvestimentos, totalSaidasManuais, saidasManuaisNoPeriodo, desembolsoTotal, gastosSuprimentosPorCategoria, faturamentoTotal, custoVendasTotal, lucroTotal, resultadoCaixaPeriodo, quantidadeVendidaTotal,
       quantidadeProduzidaTotal, numeroProducoes, ticketMedio, receitaMaisProduzida, ingredienteMaisGasto,
-      temDados: numeroProducoes > 0 || comprasNoPeriodo.length > 0 || comprasMateriaisNoPeriodo.length > 0 || investimentosNoPeriodo.length > 0 || getMixedBoxes().length > 0,
+      temDados: numeroProducoes > 0 || comprasNoPeriodo.length > 0 || comprasMateriaisNoPeriodo.length > 0 || investimentosNoPeriodo.length > 0 || saidasManuaisNoPeriodo.length > 0 || getMixedBoxes().length > 0,
       producoesListadas: [...producoesPorData].sort((a, b) => b.criadoEm - a.criadoEm),
     };
   }
@@ -3446,6 +3606,17 @@
         </div>
       </div>
 
+      <div class="panel" style="margin-bottom:18px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
+          <h3 style="margin:0;">${ICONS.cart} Saídas manuais</h3>
+          <button class="btn btn-primary btn-sm" data-action="nova-saida-manual">${ICONS.plus} Registrar saída</button>
+        </div>
+        <p class="confirm-text" style="margin:6px 0 10px;">Use para dinheiro que saiu do caixa sem vir de uma compra cadastrada (ex.: repor algo emprestado).</p>
+        ${data.saidasManuaisNoPeriodo.length ? data.saidasManuaisNoPeriodo.map((s) => `
+          <div class="mini-row"><span class="name">${escapeHtml(s.motivo)} · ${formatDateBR(s.data)}</span><span class="value">${formatMoney(s.valor)} <button class="btn btn-sm btn-icon btn-danger" data-action="excluir-saida-manual" data-id="${s.id}" title="Excluir">${ICONS.trash}</button></span></div>
+        `).join('') : `<p class="confirm-text">Nenhuma saída manual registrada neste período.</p>`}
+      </div>
+
       <div class="dash-grid" style="margin-bottom:22px;">
         <div class="stat-card tone-success">
           <div class="stat-icon">${ICONS.calc}</div>
@@ -3466,6 +3637,11 @@
           <div class="stat-icon">${ICONS.starFilled}</div>
           <div class="stat-value">${formatMoney(data.totalInvestimentos)}</div>
           <div class="stat-label">Investimentos</div>
+        </div>
+        <div class="stat-card tone-warn">
+          <div class="stat-icon">${ICONS.cart}</div>
+          <div class="stat-value">${formatMoney(data.totalSaidasManuais)}</div>
+          <div class="stat-label">Saídas manuais</div>
         </div>
         <div class="stat-card tone-success">
           <div class="stat-icon">${ICONS.box}</div>
@@ -3512,6 +3688,7 @@
           <div class="mini-row"><span class="name">Resultado de caixa do período</span><span class="value">${formatMoney(data.resultadoCaixaPeriodo)}</span></div>
           <div class="mini-row"><span class="name">Gastos operacionais</span><span class="value">${formatMoney(data.totalGastoCompras)}</span></div>
           <div class="mini-row"><span class="name">Investimentos e equipamentos</span><span class="value">${formatMoney(data.totalInvestimentos)}</span></div>
+          <div class="mini-row"><span class="name">Saídas manuais</span><span class="value">${formatMoney(data.totalSaidasManuais)}</span></div>
           <div class="mini-row"><span class="name">Desembolso total</span><span class="value">${formatMoney(data.desembolsoTotal)}</span></div>
           <div class="mini-row"><span class="name">Ingredientes</span><span class="value">${formatMoney(data.totalGastoIngredientes)}</span></div>
           <div class="mini-row"><span class="name">Suprimentos</span><span class="value">${formatMoney(data.totalGastoSuprimentos)}</span></div>
@@ -3759,6 +3936,18 @@
           onConfirm: () => { deleteInvestment(id); renderAll(); toast('Investimento excluído.', 'success'); },
         });
         break;
+      case 'nova-saida-manual':
+        openManualExpenseModal();
+        break;
+      case 'excluir-saida-manual':
+        openConfirm({
+          title: 'Excluir saída manual',
+          message: 'Deseja realmente excluir este registro de saída?',
+          confirmLabel: 'Excluir',
+          danger: true,
+          onConfirm: () => { deleteManualExpense(id); renderAll(); toast('Saída excluída.', 'success'); },
+        });
+        break;
       case 'novo-material':
         openMaterialModal();
         break;
@@ -3914,6 +4103,9 @@
           danger: true,
           onConfirm: () => { deleteMixedBox(id); renderAll(); toast('Caixa excluída e brigadeiros devolvidos ao estoque pronto.', 'success'); },
         });
+        break;
+      case 'editar-movimentacao':
+        openEditMovementModal(id);
         break;
       default:
         break;
