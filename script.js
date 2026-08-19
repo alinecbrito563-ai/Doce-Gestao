@@ -1814,32 +1814,52 @@
     return { ok: true, saida: record };
   }
 
+  function getManualExpense(id) {
+    return getManualExpenses().find((s) => s.id === id);
+  }
+
+  function updateManualExpense(id, data) {
+    const record = getManualExpense(id);
+    if (!record) return { ok: false, message: 'Saída não encontrada.' };
+    const motivo = String(data.motivo || '').trim();
+    const valor = Number(data.valor) || 0;
+    if (!motivo) return { ok: false, message: 'Informe o motivo da saída.' };
+    if (valor <= 0) return { ok: false, message: 'Informe um valor maior que zero.' };
+    record.motivo = motivo;
+    record.valor = valor;
+    record.data = data.data || record.data || todayISO();
+    saveDB();
+    return { ok: true };
+  }
+
   function deleteManualExpense(id) {
     db.settings.saidasManuais = getManualExpenses().filter((s) => s.id !== id);
     saveDB();
   }
 
-  function openManualExpenseModal() {
+  function openManualExpenseModal(id) {
+    const editing = id ? getManualExpense(id) : null;
     openModal({
-      title: 'Registrar saída manual',
+      title: editing ? 'Editar saída manual' : 'Registrar saída manual',
       bodyHTML: `
         <div class="form-grid">
-          <div class="field span-2"><label>Motivo</label><input type="text" id="saidaMotivo" placeholder="Ex.: Reposição mãe"></div>
-          <div class="field"><label>Valor (R$)</label><input type="number" min="0.01" step="any" id="saidaValor" placeholder="0,00"></div>
-          <div class="field"><label>Data</label><input type="date" id="saidaData" value="${todayISO()}"></div>
+          <div class="field span-2"><label>Motivo</label><input type="text" id="saidaMotivo" value="${editing ? escapeHtml(editing.motivo) : ''}" placeholder="Ex.: Reposição mãe"></div>
+          <div class="field"><label>Valor (R$)</label><input type="number" min="0.01" step="any" id="saidaValor" value="${editing ? editing.valor : ''}" placeholder="0,00"></div>
+          <div class="field"><label>Data</label><input type="date" id="saidaData" value="${editing ? editing.data : todayISO()}"></div>
         </div>
       `,
-      footerHTML: `<button class="btn btn-ghost" data-action="fechar-modal">Cancelar</button><button class="btn btn-primary" id="salvarSaidaManualBtn">Registrar saída</button>`,
+      footerHTML: `<button class="btn btn-ghost" data-action="fechar-modal">Cancelar</button><button class="btn btn-primary" id="salvarSaidaManualBtn">${editing ? 'Salvar alterações' : 'Registrar saída'}</button>`,
       onMount: () => document.getElementById('salvarSaidaManualBtn').addEventListener('click', () => {
-        const result = addManualExpense({
+        const data = {
           motivo: document.getElementById('saidaMotivo').value,
           valor: document.getElementById('saidaValor').value,
           data: document.getElementById('saidaData').value,
-        });
+        };
+        const result = editing ? updateManualExpense(editing.id, data) : addManualExpense(data);
         if (!result.ok) { toast(result.message, 'danger'); return; }
         closeModal();
         renderAll();
-        toast('Saída registrada.', 'success');
+        toast(editing ? 'Saída atualizada.' : 'Saída registrada.', 'success');
       }),
     });
   }
@@ -3613,7 +3633,7 @@
         </div>
         <p class="confirm-text" style="margin:6px 0 10px;">Use para dinheiro que saiu do caixa sem vir de uma compra cadastrada (ex.: repor algo emprestado).</p>
         ${data.saidasManuaisNoPeriodo.length ? data.saidasManuaisNoPeriodo.map((s) => `
-          <div class="mini-row"><span class="name">${escapeHtml(s.motivo)} · ${formatDateBR(s.data)}</span><span class="value">${formatMoney(s.valor)} <button class="btn btn-sm btn-icon btn-danger" data-action="excluir-saida-manual" data-id="${s.id}" title="Excluir">${ICONS.trash}</button></span></div>
+          <div class="mini-row"><span class="name">${escapeHtml(s.motivo)} · ${formatDateBR(s.data)}</span><span class="value">${formatMoney(s.valor)} <button class="btn btn-sm btn-icon" data-action="editar-saida-manual" data-id="${s.id}" title="Editar">${ICONS.edit}</button> <button class="btn btn-sm btn-icon btn-danger" data-action="excluir-saida-manual" data-id="${s.id}" title="Excluir">${ICONS.trash}</button></span></div>
         `).join('') : `<p class="confirm-text">Nenhuma saída manual registrada neste período.</p>`}
       </div>
 
@@ -3938,6 +3958,9 @@
         break;
       case 'nova-saida-manual':
         openManualExpenseModal();
+        break;
+      case 'editar-saida-manual':
+        openManualExpenseModal(id);
         break;
       case 'excluir-saida-manual':
         openConfirm({
