@@ -3284,11 +3284,11 @@
         ? { label: 'Finalizada', fundo: '#e8f6ee', texto: '#26734d', borda: '#bfe2ce' }
         : m.status === 'parcial'
           ? { label: 'Parcial', fundo: '#fff4df', texto: '#986414', borda: '#f1d39b' }
-          : { label: 'Em estoque', fundo: '#eef3ff', texto: '#3e5f9c', borda: '#cbd8f2' };
+          : { label: 'Em estoque', fundo: '#f2ece3', texto: '#6b4a30', borda: '#ddc9b6' };
       const movimentos = getReadyProductMovements().filter((mov) => mov.productionId === p.id);
       const totalBaixado = m.quantidadeVendida + m.quantidadeAlocadaCaixas + m.quantidadeMovimentada;
       return `
-      <div class="producao-item" data-id="${p.id}" style="padding:16px 18px;${m.status === 'finalizada' ? 'opacity:.86;background:#fcfcfc;' : ''}">
+      <div class="producao-item" data-id="${p.id}" style="padding:16px 18px;${m.status === 'finalizada' ? 'opacity:.86;background:#faf6f3;' : ''}">
         <div style="display:grid;grid-template-columns:minmax(230px,1.5fr) minmax(260px,1fr) auto;gap:16px;align-items:center;">
           <div class="info" style="min-width:0;">
             <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
