@@ -3252,6 +3252,7 @@
   }
 
   let ocultarProducoesFinalizadas = false;
+  let producoesExpandidas = new Set();
 
   function renderProducaoLista() {
     const list = document.getElementById('producoesList');
@@ -3305,7 +3306,7 @@
 
           <div style="display:flex;align-items:center;gap:6px;justify-content:flex-end;">
             ${m.quantidadeRestante > EPS ? `<button class="btn btn-sm" data-action="movimentar-produto-pronto" data-id="${p.id}">${ICONS.move} Movimentar</button>` : ''}
-            <button class="btn btn-sm" data-action="toggle-detalhes-producao" data-id="${p.id}">Ver detalhes</button>
+            <button class="btn btn-sm" data-action="toggle-detalhes-producao" data-id="${p.id}">${producoesExpandidas.has(p.id) ? 'Ocultar detalhes' : 'Ver detalhes'}</button>
             <button class="btn btn-sm btn-icon" data-action="editar-producao" data-id="${p.id}" title="Editar">${ICONS.edit}</button>
             <button class="btn btn-sm btn-icon btn-danger" data-action="excluir-producao" data-id="${p.id}" title="Excluir">${ICONS.trash}</button>
           </div>
@@ -3319,7 +3320,7 @@
           <div style="padding:7px 9px;border-radius:9px;background:${m.quantidadeRestante <= EPS ? '#e8f6ee' : '#fff1eb'};"><span style="display:block;font-size:10px;opacity:.65;">Disponível</span><strong style="font-size:13px;">${formatNumber(m.quantidadeRestante, 0)}</strong></div>
         </div>
 
-        <div data-role="detalhes-producao" style="display:none;margin-top:14px;padding-top:14px;border-top:1px solid #ead8d1;">
+        <div data-role="detalhes-producao" style="display:${producoesExpandidas.has(p.id) ? 'block' : 'none'};margin-top:14px;padding-top:14px;border-top:1px solid #ead8d1;">
           <div class="form-grid cols-3" style="margin:0 0 10px;">
             <div class="field"><label>Qtd. vendida</label><input type="number" min="0" step="any" data-role="qtdVendida" data-id="${p.id}" value="${p.quantidadeVendida || ''}"></div>
             <div class="field"><label>Preço de venda (un.)</label><input type="number" min="0" step="any" data-role="precoVenda" data-id="${p.id}" value="${p.precoVendaUnitario || ''}"></div>
@@ -3338,11 +3339,19 @@
 
     list.querySelectorAll('[data-action="toggle-detalhes-producao"]').forEach((btn) => {
       btn.addEventListener('click', () => {
-        const row = list.querySelector(`.producao-item[data-id="${btn.dataset.id}"]`);
+        const pid = btn.dataset.id;
+        const row = list.querySelector(`.producao-item[data-id="${pid}"]`);
         const detalhes = row.querySelector('[data-role="detalhes-producao"]');
         const aberto = detalhes.style.display !== 'none';
-        detalhes.style.display = aberto ? 'none' : 'block';
-        btn.textContent = aberto ? 'Ver detalhes' : 'Ocultar detalhes';
+        if (aberto) {
+          detalhes.style.display = 'none';
+          producoesExpandidas.delete(pid);
+          btn.textContent = 'Ver detalhes';
+        } else {
+          detalhes.style.display = 'block';
+          producoesExpandidas.add(pid);
+          btn.textContent = 'Ocultar detalhes';
+        }
       });
     });
 
