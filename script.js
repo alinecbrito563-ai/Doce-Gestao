@@ -758,9 +758,52 @@
 
   function getRecipe(id) { return db.recipes.find((r) => r.id === id); }
 
-  function computeRecipeCost(recipe) {
+  // Tipo de um item de composição de receita: 'ingrediente' (padrão, para
+  // compatibilidade com receitas antigas que não tinham este campo) ou
+  // 'receita' (sub-receita/preparo). Nunca inferir a partir de outra coisa —
+  // usar sempre este helper para não espalhar `item.tipo || 'ingrediente'`
+  // pelo código inteiro.
+  function itemComponentTipo(item) { return (item && item.tipo === 'receita') ? 'receita' : 'ingrediente'; }
+
+  // Verifica se `recipeId` depende (direta ou indiretamente, através de
+  // sub-receitas) da receita `targetId`. Usado para bloquear ciclos ao salvar
+  // uma receita composta (ex.: A usa B e B usa A).
+  function recipeDependsOn(recipeId, targetId, visited) {
+    visited = visited || new Set();
+    if (!recipeId || visited.has(recipeId)) return false;
+    visited.add(recipeId);
+    const r = getRecipe(recipeId);
+    if (!r) return false;
+    return (r.ingredientes || []).some((item) => {
+      if (itemComponentTipo(item) !== 'receita') return false;
+      if (item.receitaId === targetId) return true;
+      return recipeDependsOn(item.receitaId, targetId, visited);
+    });
+  }
+
+  // Custo estimado (com preços/custos ATUAIS) de uma receita, incluindo
+  // recursivamente o custo de qualquer sub-receita utilizada como componente.
+  // `visited` evita loop infinito caso algum dado antigo tenha ficado com um
+  // ciclo (defesa extra: o cadastro já impede ciclos ao salvar).
+  function computeRecipeCost(recipe, visited) {
+    visited = visited || new Set();
+    if (recipe && recipe.id && visited.has(recipe.id)) {
+      return { custoTotal: 0, custoUnitario: 0, valorVendaTotal: 0, valorVendaUnitario: 0 };
+    }
+    const nextVisited = new Set(visited);
+    if (recipe && recipe.id) nextVisited.add(recipe.id);
+
     let custoTotal = 0;
     (recipe.ingredientes || []).forEach((item) => {
+      if (itemComponentTipo(item) === 'receita') {
+        const sub = getRecipe(item.receitaId);
+        if (!sub) return;
+        const subCost = computeRecipeCost(sub, nextVisited);
+        const subRendimento = Number(sub.rendimento) || 0;
+        const custoPorUnidadeSub = subRendimento > 0 ? subCost.custoTotal / subRendimento : 0;
+        custoTotal += custoPorUnidadeSub * (Number(item.quantidade) || 0);
+        return;
+      }
       const ing = getIngredient(item.ingredienteId);
       if (!ing) return;
       const usageBase = usageToBaseForIngredient(ing, item.quantidade, item.unidade);
@@ -846,7 +889,18 @@
       if (typeof p.considerarFinanceiro !== 'boolean') { p.considerarFinanceiro = true; changed = true; }
       if (!p.origem) { p.origem = p.considerarFinanceiro ? 'Compra' : 'Estoque inicial'; changed = true; }
     });
+    // Receitas compostas / sub-receitas: todo item de composição passa a ter
+    // um campo `tipo` explícito. Receitas antigas não têm esse campo — nesse
+    // caso o item sempre foi um ingrediente normal, então marcamos
+    // 'ingrediente' explicitamente (nunca convertendo automaticamente nada
+    // para sub-receita). Isso preserva 100% o comportamento já existente.
+    db.recipes.forEach((r) => {
+      (r.ingredientes || []).forEach((item) => {
+        if (!item.tipo) { item.tipo = 'ingrediente'; changed = true; }
+      });
+    });
     db.productions.forEach((p) => {
+      if (!Array.isArray(p.consumosPreparos)) { p.consumosPreparos = []; changed = true; }
       if (typeof p.quantidadeReceitas !== 'number') {
         const receita = getRecipe(p.receitaId);
         const rendimentoPadrao = receita ? (Number(receita.rendimento) || 1) : 1;
@@ -898,37 +952,51 @@
     if (changed) saveDB();
   }
 
-  // Monta um mensagem legível listando cada ingrediente faltante e a quantidade.
+  // Monta um mensagem legível listando cada componente faltante (ingrediente
+  // ou sub-receita/preparo) e a quantidade.
   function buildFaltaMessage(faltas) {
     if (!faltas.length) return '';
+    const formatFalta = (f) => f.tipo === 'receita'
+      ? `${formatNumber(f.faltanteBase, 0)} un. de preparo`
+      : formatQuantityBase(f.faltanteBase, f.unidade);
     if (faltas.length === 1) {
       const f = faltas[0];
-      return `Estoque insuficiente de ${f.nome}. Faltam ${formatQuantityBase(f.faltanteBase, f.unidade)}.`;
+      return `Estoque insuficiente de ${f.nome}. Faltam ${formatFalta(f)}.`;
     }
-    const partes = faltas.map((f) => `${f.nome} (faltam ${formatQuantityBase(f.faltanteBase, f.unidade)})`);
+    const partes = faltas.map((f) => `${f.nome} (faltam ${formatFalta(f)})`);
     return `Estoque insuficiente para: ${partes.join('; ')}.`;
   }
 
-  // Calcula o total necessário de cada ingrediente conforme a quantidade de
-  // receitas completas feitas. O rendimento real não altera o consumo: ele
-  // serve para calcular o custo por unidade daquela produção específica.
-  function computeNeededByIngredient(recipe, quantidadeReceitas) {
+  // Calcula o total necessário de cada componente (ingredientes normais e
+  // sub-receitas/preparos) conforme a quantidade de receitas completas
+  // feitas. O rendimento real não altera o consumo: ele serve para calcular
+  // o custo por unidade daquela produção específica.
+  function computeNeededByComponents(recipe, quantidadeReceitas) {
     const fator = Number(quantidadeReceitas) || 0;
     const neededByIngredient = {};
-    recipe.ingredientes.forEach((item) => {
+    const neededByReceita = {};
+    (recipe.ingredientes || []).forEach((item) => {
+      if (itemComponentTipo(item) === 'receita') {
+        const qty = (Number(item.quantidade) || 0) * fator;
+        if (qty > 0) neededByReceita[item.receitaId] = (neededByReceita[item.receitaId] || 0) + qty;
+        return;
+      }
       const ing = getIngredient(item.ingredienteId);
       if (!ing) return;
       const usageBase = usageToBaseForIngredient(ing, item.quantidade, item.unidade) * fator;
       neededByIngredient[item.ingredienteId] = (neededByIngredient[item.ingredienteId] || 0) + usageBase;
     });
-    return neededByIngredient;
+    return { neededByIngredient, neededByReceita };
   }
 
   // Verifica se uma produção é viável SEM alterar nada no banco de dados.
   // extraByIngredient (opcional) simula estoque adicional que seria devolvido
   // pela reversão de uma produção antiga, usado ao editar uma produção.
-  function validateProductionFeasibility(recipe, quantidadeReceitas, extraByIngredient) {
-    const neededByIngredient = computeNeededByIngredient(recipe, quantidadeReceitas);
+  // ignoreProductionId (opcional) exclui as próprias alocações de sub-receita
+  // desta produção (quando ela está sendo editada) do cálculo de
+  // disponibilidade das receitas-base que ela consome.
+  function validateProductionFeasibility(recipe, quantidadeReceitas, extraByIngredient, ignoreProductionId) {
+    const { neededByIngredient, neededByReceita } = computeNeededByComponents(recipe, quantidadeReceitas);
     const faltas = [];
     Object.keys(neededByIngredient).forEach((ingId) => {
       const extra = extraByIngredient ? extraByIngredient[ingId] : null;
@@ -937,22 +1005,33 @@
         : planConsumption(ingId, neededByIngredient[ingId]);
       if (!check.ok) {
         const ing = getIngredient(ingId);
-        faltas.push({ ingredienteId: ingId, nome: ing ? ing.nome : 'Ingrediente removido', faltanteBase: check.faltanteBase, unidade: ing ? ing.unidade : 'unidade' });
+        faltas.push({ tipo: 'ingrediente', ingredienteId: ingId, nome: ing ? ing.nome : 'Ingrediente removido', faltanteBase: check.faltanteBase, unidade: ing ? ing.unidade : 'unidade' });
       }
     });
-    return { ok: faltas.length === 0, faltas, neededByIngredient };
+    Object.keys(neededByReceita).forEach((recId) => {
+      const plan = planReadyProductConsumption(recId, neededByReceita[recId], null, ignoreProductionId);
+      if (!plan.ok) {
+        const rec = getRecipe(recId);
+        faltas.push({ tipo: 'receita', receitaId: recId, nome: rec ? rec.nome : 'Receita/preparo removido', faltanteBase: plan.faltante, unidade: 'un' });
+      }
+    });
+    return { ok: faltas.length === 0, faltas, neededByIngredient, neededByReceita };
   }
 
   // Aplica de fato o consumo de uma produção já validada como viável: debita
-  // os lotes (FIFO), cria as movimentações e retorna exatamente quais lotes
-  // foram usados — cada um com sua quantidade e seu custo real de retirada —
-  // para permitir estorno exato e custo real (não em média) depois.
-  function applyProductionConsumption(recipe, neededByIngredient, dataMov) {
+  // os lotes de ingredientes (FIFO), reserva o estoque pronto de eventuais
+  // sub-receitas/preparos utilizados (mesmo mecanismo "virtual" das caixas
+  // mistas — nada é fisicamente mutado, apenas registrado como alocação),
+  // cria as movimentações e retorna exatamente o que foi usado — cada lote
+  // com sua quantidade e seu custo real de retirada — para permitir estorno
+  // exato e custo real (não em média) depois.
+  function applyProductionConsumption(recipe, needed, dataMov, ignoreProductionId) {
     const consumos = [];
+    const consumosPreparos = [];
     const movementIds = [];
     let custoTotalReal = 0;
-    Object.keys(neededByIngredient).forEach((ingId) => {
-      const result = planConsumption(ingId, neededByIngredient[ingId]);
+    Object.keys(needed.neededByIngredient || {}).forEach((ingId) => {
+      const result = planConsumption(ingId, needed.neededByIngredient[ingId]);
       // Não deve falhar aqui: a viabilidade já foi validada antes de chamar esta função.
       applyConsumptionPlan(result.plan);
       const total = result.plan.reduce((s, x) => s + x.quantidadeBase, 0);
@@ -962,7 +1041,19 @@
       consumos.push({ ingredienteId: ingId, lots: result.plan.map((x) => ({ purchaseId: x.purchaseId, quantidadeBase: x.quantidadeBase, custo: x.custo })) });
       movementIds.push(mov.id);
     });
-    return { consumos, movementIds, custoTotalReal };
+    Object.keys(needed.neededByReceita || {}).forEach((recId) => {
+      const plan = planReadyProductConsumption(recId, needed.neededByReceita[recId], null, ignoreProductionId);
+      // Não deve falhar aqui pelo mesmo motivo acima: viabilidade já validada.
+      const custoComponente = plan.allocations.reduce((s, a) => s + a.quantidade * a.custoUnitario, 0);
+      custoTotalReal += custoComponente;
+      const subRecipe = getRecipe(recId);
+      consumosPreparos.push({
+        receitaId: recId,
+        receitaNome: subRecipe ? subRecipe.nome : '',
+        lots: plan.allocations.map((a) => ({ productionId: a.productionId, quantidade: a.quantidade, custo: a.quantidade * a.custoUnitario })),
+      });
+    });
+    return { consumos, consumosPreparos, movementIds, custoTotalReal };
   }
 
   function registerProduction(data) {
@@ -982,7 +1073,7 @@
       return null;
     }
 
-    const applied = applyProductionConsumption(recipe, feasibility.neededByIngredient, data.data);
+    const applied = applyProductionConsumption(recipe, { neededByIngredient: feasibility.neededByIngredient, neededByReceita: feasibility.neededByReceita }, data.data);
     const production = {
       id: uid(),
       receitaId: recipe.id,
@@ -998,6 +1089,7 @@
       custoTotal: applied.custoTotalReal, // congelado: custo real FIFO, nunca recalculado depois
       custoNaoRegistrado: false,
       consumos: applied.consumos,
+      consumosPreparos: applied.consumosPreparos, // sub-receitas/preparos consumidos, com custo histórico já congelado
       movementIds: applied.movementIds,
       criadoEm: Date.now(),
     };
@@ -1025,9 +1117,10 @@
     const faturamento = precoVendaUnitario * quantidadeVendida;
     const lucro = custoRegistrado ? faturamento - custoVendido : 0;
     const margemLucro = custoRegistrado && faturamento > 0 ? (lucro / faturamento) * 100 : 0;
-    const quantidadeAlocadaCaixas = typeof getAllocatedFromProduction === 'function' ? getAllocatedFromProduction(production.id) : 0;
+    const quantidadeAlocadaCaixas = typeof getAllocatedToBoxes === 'function' ? getAllocatedToBoxes(production.id) : 0;
+    const quantidadeAlocadaPreparos = typeof getAllocatedToSubRecipes === 'function' ? getAllocatedToSubRecipes(production.id) : 0;
     const quantidadeMovimentada = typeof getReadyMovementTotal === 'function' ? getReadyMovementTotal(production.id) : 0;
-    const quantidadeBaixada = quantidadeVendida + quantidadeAlocadaCaixas + quantidadeMovimentada;
+    const quantidadeBaixada = quantidadeVendida + quantidadeAlocadaCaixas + quantidadeAlocadaPreparos + quantidadeMovimentada;
     const quantidadeRestante = Math.max(0, quantidadeProduzida - quantidadeBaixada);
     const percentualBaixado = quantidadeProduzida > 0 ? Math.min(100, (quantidadeBaixada / quantidadeProduzida) * 100) : 0;
     const status = quantidadeRestante <= EPS
@@ -1035,7 +1128,7 @@
       : quantidadeBaixada > EPS ? 'parcial' : 'estoque';
     return {
       custoTotal, custoUnitario, custoVendido, faturamento, lucro, margemLucro,
-      quantidadeProduzida, quantidadeVendida, quantidadeAlocadaCaixas,
+      quantidadeProduzida, quantidadeVendida, quantidadeAlocadaCaixas, quantidadeAlocadaPreparos,
       quantidadeMovimentada, quantidadeBaixada, quantidadeRestante,
       percentualBaixado, status, custoRegistrado,
     };
@@ -1051,7 +1144,7 @@
     const allocatedToBoxes = getAllocatedFromProduction(p.id);
     const maxDirectSale = Math.max(0, (Number(p.quantidadeProduzida) || 0) - allocatedToBoxes);
     if (qtd > maxDirectSale + EPS) {
-      return { ok: false, message: `Esta produção possui ${formatNumber(allocatedToBoxes, 0)} unidade(s) reservadas em caixas. A venda avulsa máxima é ${formatNumber(maxDirectSale, 0)} un.` };
+      return { ok: false, message: `Esta produção possui ${formatNumber(allocatedToBoxes, 0)} unidade(s) reservadas em caixas ou usadas como sub-receita. A venda avulsa máxima é ${formatNumber(maxDirectSale, 0)} un.` };
     }
     const preco = Number(precoVendaUnitario) || 0;
     if (preco < 0) return { ok: false, message: 'O preço de venda não pode ser negativo.' };
@@ -1089,8 +1182,14 @@
     const production = db.productions.find((p) => p.id === id);
     if (!production) return { ok: false, message: 'Produção não encontrada.' };
     const allocated = getAllocatedFromProduction(id);
-    if (allocated > EPS) return { ok: false, message: `Esta produção possui ${formatNumber(allocated, 0)} unidade(s) usadas em caixas. Exclua primeiro as caixas relacionadas.` };
+    if (allocated > EPS) return { ok: false, message: `Esta produção possui ${formatNumber(allocated, 0)} unidade(s) usadas em caixas ou em outras receitas (sub-receita). Exclua primeiro os itens relacionados.` };
     db.settings.movimentosProdutosProntos = getReadyProductMovements().filter((m) => m.productionId !== id);
+    // A produção pode, ela mesma, ter consumido sub-receitas de outras
+    // produções (consumosPreparos). Ao remover este registro do array
+    // db.productions logo abaixo, essas alocações desaparecem junto — como a
+    // disponibilidade da produção-origem é sempre calculada dinamicamente
+    // (getAllocatedToSubRecipes), o estoque dela é "devolvido" automaticamente,
+    // sem necessidade de nenhuma mutação extra aqui.
     reverseProduction(production);
     db.productions = db.productions.filter((p) => p.id !== id);
     saveDB();
@@ -1106,7 +1205,7 @@
     const production = db.productions.find((p) => p.id === id);
     if (!production) return { ok: false, message: 'Produção não encontrada.' };
     const allocated = getAllocatedFromProduction(id);
-    if (allocated > EPS) return { ok: false, message: `Esta produção possui ${formatNumber(allocated, 0)} unidade(s) usadas em caixas. Exclua primeiro as caixas relacionadas para editar.` };
+    if (allocated > EPS) return { ok: false, message: `Esta produção possui ${formatNumber(allocated, 0)} unidade(s) usadas em caixas ou em outras receitas (sub-receita). Exclua ou edite primeiro os itens relacionados para editar.` };
     const movedReady = getReadyMovementTotal(id);
     const soldReady = Number(production.quantidadeVendida) || 0;
     const newRecipe = getRecipe(data.receitaId);
@@ -1127,7 +1226,12 @@
       item.lots.forEach((l) => { map[l.purchaseId] = (map[l.purchaseId] || 0) + l.quantidadeBase; });
     });
 
-    const feasibility = validateProductionFeasibility(newRecipe, newQuantidadeReceitas, extraByIngredient);
+    // Para sub-receitas/preparos usados por ESTA produção: passar o próprio id
+    // como ignoreProductionId faz com que as alocações antigas dela sejam
+    // descontadas do cálculo de disponibilidade das receitas-base — o
+    // equivalente, para o estoque "virtual" de preparos, ao extraByIngredient
+    // acima (que faz o mesmo para lotes físicos de ingredientes).
+    const feasibility = validateProductionFeasibility(newRecipe, newQuantidadeReceitas, extraByIngredient, id);
     if (!feasibility.ok) {
       // Nada foi alterado: a produção antiga continua exatamente como estava.
       return { ok: false, message: buildFaltaMessage(feasibility.faltas) };
@@ -1135,7 +1239,7 @@
 
     // Só agora, com a certeza de que a nova produção cabe, mutamos de fato:
     reverseProduction(production, { silent: true });
-    const applied = applyProductionConsumption(newRecipe, computeNeededByIngredient(newRecipe, newQuantidadeReceitas), data.data);
+    const applied = applyProductionConsumption(newRecipe, { neededByIngredient: feasibility.neededByIngredient, neededByReceita: feasibility.neededByReceita }, data.data, id);
 
     production.receitaId = newRecipe.id;
     production.receitaNome = newRecipe.nome;
@@ -1145,6 +1249,7 @@
     production.data = data.data || production.data;
     production.observacoes = data.observacoes || '';
     production.consumos = applied.consumos;
+    production.consumosPreparos = applied.consumosPreparos;
     production.movementIds = applied.movementIds;
     // Recongela o custo com os lotes REALMENTE consumidos agora (FIFO exato),
     // já que a edição é, na prática, uma "nova criação" da produção.
@@ -1170,13 +1275,40 @@
     return db.settings.caixasMistas;
   }
 
-  function getAllocatedFromProduction(productionId, ignoreBoxId) {
+  // Quanto do estoque pronto desta produção já foi reservado em CAIXAS MISTAS.
+  function getAllocatedToBoxes(productionId, ignoreBoxId) {
     return getMixedBoxes().reduce((total, box) => {
       if (ignoreBoxId && box.id === ignoreBoxId) return total;
       return total + (box.alocacoes || [])
         .filter((a) => a.productionId === productionId)
         .reduce((s, a) => s + (Number(a.quantidade) || 0), 0);
     }, 0);
+  }
+
+  // Quanto do estoque pronto desta produção já foi consumido como
+  // SUB-RECEITA/PREPARO por outras produções (receitas compostas). Cada
+  // produção composta guarda em `consumosPreparos` os lotes (produção de
+  // origem + quantidade) que ela consumiu — o mesmo princípio de FIFO
+  // "virtual" já usado pelas caixas mistas, sem precisar de uma tabela de
+  // estoque separada: a disponibilidade é sempre calculada a partir de quem
+  // já reivindicou aquela produção.
+  function getAllocatedToSubRecipes(productionId, ignoreProductionId) {
+    return db.productions.reduce((total, p) => {
+      if (ignoreProductionId && p.id === ignoreProductionId) return total;
+      return total + (p.consumosPreparos || []).reduce((s, comp) => {
+        return s + (comp.lots || [])
+          .filter((l) => l.productionId === productionId)
+          .reduce((s2, l) => s2 + (Number(l.quantidade) || 0), 0);
+      }, 0);
+    }, 0);
+  }
+
+  // Total já reservado/consumido do estoque pronto desta produção, somando
+  // caixas mistas e sub-receitas. ignoreBoxId/ignoreProductionId permitem
+  // "descontar" a própria alocação de uma caixa ou produção que está sendo
+  // editada, sem mutar nada (mesmo princípio de planConsumptionWithExtra).
+  function getAllocatedFromProduction(productionId, ignoreBoxId, ignoreProductionId) {
+    return getAllocatedToBoxes(productionId, ignoreBoxId) + getAllocatedToSubRecipes(productionId, ignoreProductionId);
   }
 
   function getReadyProductMovements() {
@@ -1190,10 +1322,10 @@
       .reduce((s, m) => s + (Number(m.quantidade) || 0), 0);
   }
 
-  function getProductionReadyAvailable(production, ignoreBoxId) {
+  function getProductionReadyAvailable(production, ignoreBoxId, ignoreProductionId) {
     const produced = Number(production.quantidadeProduzida) || 0;
     const soldDirect = Number(production.quantidadeVendida) || 0;
-    const allocated = getAllocatedFromProduction(production.id, ignoreBoxId);
+    const allocated = getAllocatedFromProduction(production.id, ignoreBoxId, ignoreProductionId);
     const moved = getReadyMovementTotal(production.id);
     return Math.max(0, produced - soldDirect - allocated - moved);
   }
@@ -1224,13 +1356,13 @@
     return { ok: true };
   }
 
-  function getReadyStockByRecipe(recipeId, ignoreBoxId) {
+  function getReadyStockByRecipe(recipeId, ignoreBoxId, ignoreProductionId) {
     return db.productions
       .filter((p) => p.receitaId === recipeId)
-      .reduce((s, p) => s + getProductionReadyAvailable(p, ignoreBoxId), 0);
+      .reduce((s, p) => s + getProductionReadyAvailable(p, ignoreBoxId, ignoreProductionId), 0);
   }
 
-  function planReadyProductConsumption(recipeId, quantityNeeded, ignoreBoxId) {
+  function planReadyProductConsumption(recipeId, quantityNeeded, ignoreBoxId, ignoreProductionId) {
     let remaining = Number(quantityNeeded) || 0;
     const allocations = [];
     const productions = db.productions
@@ -1239,7 +1371,7 @@
 
     for (const p of productions) {
       if (remaining <= EPS) break;
-      const available = getProductionReadyAvailable(p, ignoreBoxId);
+      const available = getProductionReadyAvailable(p, ignoreBoxId, ignoreProductionId);
       if (available <= EPS) continue;
       const take = Math.min(available, remaining);
       const m = computeProductionMetrics(p);
@@ -2503,7 +2635,7 @@
           <div class="recipe-card-top">
             <h3><button class="star-btn" data-action="favoritar-receita" data-id="${r.id}" title="Favoritar">${r.favorita ? ICONS.starFilled : ICONS.star}</button> ${escapeHtml(r.nome)}</h3>
           </div>
-          <div class="ing-meta"><span>${r.ingredientes.length} ingrediente(s)</span><span>Rende ${formatNumber(r.rendimento, 0)} un.${r.pesoUnitarioPadrao ? ` de ${formatNumber(r.pesoUnitarioPadrao, 0)} g` : ''}</span></div>
+          <div class="ing-meta"><span>${r.ingredientes.length} componente(s)${r.ingredientes.some((it) => itemComponentTipo(it) === 'receita') ? ' · usa sub-receita' : ''}</span><span>Rende ${formatNumber(r.rendimento, 0)} un.${r.pesoUnitarioPadrao ? ` de ${formatNumber(r.pesoUnitarioPadrao, 0)} g` : ''}</span></div>
           <div class="recipe-price-row"><span>Custo total</span><b>${formatMoney(cost.custoTotal)}</b></div>
           <div class="recipe-price-row"><span>Custo por unidade</span><b>${formatMoney(cost.custoUnitario)}</b></div>
           <div class="recipe-sell">${formatMoney(cost.valorVendaUnitario)} <span style="font-size:11px; color:var(--muted); font-family:var(--font-body);">venda/un.</span></div>
@@ -2521,13 +2653,22 @@
   function openRecipeModal(id) {
     const editing = id ? getRecipe(id) : null;
     recipeIngredientRows = editing
-      ? editing.ingredientes.map((it) => Object.assign({ rowId: uid() }, it))
+      ? editing.ingredientes.map((it) => Object.assign({ rowId: uid(), tipo: itemComponentTipo(it) }, it))
       : [];
 
     function ingredientOptions(selectedId, unitFamily) {
       return db.ingredients
         .filter((i) => !unitFamily || familyOf(i.unidade) === unitFamily || !selectedId)
         .map((i) => `<option value="${i.id}" ${i.id === selectedId ? 'selected' : ''}>${escapeHtml(i.nome)}</option>`).join('');
+    }
+
+    // Receitas disponíveis para uso como sub-receita/preparo: exclui a
+    // própria receita sendo editada (não pode se auto-referenciar) — ciclos
+    // indiretos (A usa B, B usa A) são bloqueados no momento de salvar.
+    function receitaComponentOptions(selectedId) {
+      return db.recipes
+        .filter((r) => !editing || r.id !== editing.id)
+        .map((r) => `<option value="${r.id}" ${r.id === selectedId ? 'selected' : ''}>${escapeHtml(r.nome)} (rende ${formatNumber(r.rendimento, 0)})</option>`).join('');
     }
 
     function unitOptions(ingredienteId, selectedUnit) {
@@ -2539,13 +2680,28 @@
     function renderRows() {
       const wrap = document.getElementById('recipeIngredientRows');
       if (!wrap) return;
-      if (!db.ingredients.length) {
-        wrap.innerHTML = `<p class="confirm-text">Cadastre ingredientes no Estoque antes de montar receitas.</p>`;
-      } else if (!recipeIngredientRows.length) {
-        wrap.innerHTML = `<p class="confirm-text">Nenhum ingrediente adicionado ainda.</p>`;
+      if (!recipeIngredientRows.length) {
+        wrap.innerHTML = `<p class="confirm-text">Nenhum componente adicionado ainda.</p>`;
       } else {
         wrap.innerHTML = recipeIngredientRows.map((row) => `
           <div class="ingredient-row" data-row-id="${row.rowId}">
+            <div class="field">
+              <label>Tipo</label>
+              <select data-role="comp-tipo" data-row="${row.rowId}">
+                <option value="ingrediente" ${row.tipo !== 'receita' ? 'selected' : ''}>Ingrediente</option>
+                <option value="receita" ${row.tipo === 'receita' ? 'selected' : ''}>Receita/preparo</option>
+              </select>
+            </div>
+            ${row.tipo === 'receita' ? `
+            <div class="field">
+              <label>Receita/preparo</label>
+              <select data-role="comp-receita" data-row="${row.rowId}">${receitaComponentOptions(row.receitaId)}</select>
+            </div>
+            <div class="field">
+              <label>Quantidade (na unidade de rendimento da receita)</label>
+              <input type="number" min="0" step="any" data-role="comp-qty" data-row="${row.rowId}" value="${row.quantidade || ''}">
+            </div>
+            ` : `
             <div class="field">
               <label>Ingrediente</label>
               <select data-role="ing-select" data-row="${row.rowId}">${ingredientOptions(row.ingredienteId)}</select>
@@ -2558,9 +2714,29 @@
               <label>Unid.</label>
               <select data-role="ing-unit" data-row="${row.rowId}">${unitOptions(row.ingredienteId, row.unidade)}</select>
             </div>
+            `}
             <button class="btn btn-sm btn-icon btn-danger" data-action="remover-linha-receita" data-row="${row.rowId}" type="button">${ICONS.trash}</button>
           </div>
         `).join('');
+
+        wrap.querySelectorAll('[data-role="comp-tipo"]').forEach((sel) => {
+          sel.addEventListener('change', (e) => {
+            const row = recipeIngredientRows.find((r) => r.rowId === e.target.dataset.row);
+            row.tipo = e.target.value;
+            if (row.tipo === 'receita') {
+              row.receitaId = db.recipes.find((r) => !editing || r.id !== editing.id) ? db.recipes.find((r) => !editing || r.id !== editing.id).id : '';
+              row.ingredienteId = null;
+              row.unidade = null;
+            } else {
+              const first = db.ingredients[0];
+              row.ingredienteId = first ? first.id : null;
+              row.unidade = first ? unitOptionsForIngredient(first)[0] : 'g';
+              row.receitaId = null;
+            }
+            row.quantidade = '';
+            renderRows();
+          });
+        });
         wrap.querySelectorAll('[data-role="ing-select"]').forEach((sel) => {
           sel.addEventListener('change', (e) => {
             const row = recipeIngredientRows.find((r) => r.rowId === e.target.dataset.row);
@@ -2571,7 +2747,7 @@
             updatePreview();
           });
         });
-        wrap.querySelectorAll('[data-role="ing-qty"]').forEach((inp) => {
+        wrap.querySelectorAll('[data-role="ing-qty"], [data-role="comp-qty"]').forEach((inp) => {
           inp.addEventListener('input', (e) => {
             const row = recipeIngredientRows.find((r) => r.rowId === e.target.dataset.row);
             row.quantidade = e.target.value;
@@ -2585,19 +2761,28 @@
             updatePreview();
           });
         });
+        wrap.querySelectorAll('[data-role="comp-receita"]').forEach((sel) => {
+          sel.addEventListener('change', (e) => {
+            const row = recipeIngredientRows.find((r) => r.rowId === e.target.dataset.row);
+            row.receitaId = e.target.value;
+            updatePreview();
+          });
+        });
       }
       updatePreview();
     }
 
     function collectValidRows() {
       return recipeIngredientRows
-        .filter((r) => r.ingredienteId && Number(r.quantidade) > 0)
-        .map((r) => ({ ingredienteId: r.ingredienteId, quantidade: Number(r.quantidade), unidade: r.unidade }));
+        .filter((r) => Number(r.quantidade) > 0 && (r.tipo === 'receita' ? r.receitaId : r.ingredienteId))
+        .map((r) => (r.tipo === 'receita'
+          ? { tipo: 'receita', receitaId: r.receitaId, quantidade: Number(r.quantidade) }
+          : { tipo: 'ingrediente', ingredienteId: r.ingredienteId, quantidade: Number(r.quantidade), unidade: r.unidade }));
     }
 
     function updatePreview() {
       const rendimento = Number(document.getElementById('rRendimento').value) || 0;
-      const tempRecipe = { ingredientes: collectValidRows(), rendimento };
+      const tempRecipe = { id: editing ? editing.id : null, ingredientes: collectValidRows(), rendimento };
       const cost = computeRecipeCost(tempRecipe);
       const preview = document.getElementById('recipeCostPreview');
       if (preview) {
@@ -2627,9 +2812,10 @@
             <input type="number" min="0" step="any" id="rPesoUnitario" value="${editing && editing.pesoUnitarioPadrao ? editing.pesoUnitarioPadrao : ''}" placeholder="Ex.: 18">
           </div>
         </div>
-        <h2 class="section-title" style="font-size:15px; margin:18px 0 6px;">Ingredientes da receita</h2>
+        <h2 class="section-title" style="font-size:15px; margin:18px 0 6px;">Componentes da receita</h2>
+        <p class="confirm-text" style="margin:0 0 10px;">Cada componente pode ser um ingrediente do estoque ou uma outra receita já cadastrada (usada como sub-receita/preparo).</p>
         <div class="ingredient-row-list" id="recipeIngredientRows"></div>
-        <button class="btn btn-sm" id="addIngredientRowBtn" type="button">${ICONS.plus} Adicionar ingrediente</button>
+        <button class="btn btn-sm" id="addIngredientRowBtn" type="button">${ICONS.plus} Adicionar componente</button>
         <div class="recipe-cost-preview" id="recipeCostPreview"></div>
         <div class="field" style="margin-top:14px;">
           <label>Observações</label>
@@ -2644,12 +2830,19 @@
         renderRows();
         document.getElementById('rRendimento').addEventListener('input', updatePreview);
         document.getElementById('addIngredientRowBtn').addEventListener('click', () => {
-          if (!db.ingredients.length) { toast('Cadastre ao menos um ingrediente primeiro.', 'warning'); return; }
-          const first = db.ingredients[0];
-          recipeIngredientRows.push({ rowId: uid(), ingredienteId: first.id, quantidade: '', unidade: compatibleUnitsFor(first.unidade)[0] });
+          if (db.ingredients.length) {
+            const first = db.ingredients[0];
+            recipeIngredientRows.push({ rowId: uid(), tipo: 'ingrediente', ingredienteId: first.id, quantidade: '', unidade: compatibleUnitsFor(first.unidade)[0] });
+          } else if (db.recipes.some((r) => !editing || r.id !== editing.id)) {
+            const firstRecipe = db.recipes.find((r) => !editing || r.id !== editing.id);
+            recipeIngredientRows.push({ rowId: uid(), tipo: 'receita', receitaId: firstRecipe.id, quantidade: '' });
+          } else {
+            toast('Cadastre ao menos um ingrediente ou outra receita primeiro.', 'warning');
+            return;
+          }
           renderRows();
         });
-        // Remoção de linhas de ingrediente (delegação local, escopada ao próprio modal)
+        // Remoção de linhas de componente (delegação local, escopada ao próprio modal)
         document.getElementById('recipeIngredientRows').addEventListener('click', (e) => {
           const btn = e.target.closest('[data-action="remover-linha-receita"]');
           if (!btn) return;
@@ -2662,8 +2855,27 @@
           const pesoUnitarioPadrao = document.getElementById('rPesoUnitario').value;
           if (!nome) { toast('Informe o nome da receita.', 'danger'); return; }
           if (!rendimento || Number(rendimento) <= 0) { toast('Informe um rendimento válido.', 'danger'); return; }
+          const ingredientes = collectValidRows();
+
+          // Bloqueia auto-referência direta e ciclos indiretos (A usa B, B usa A)
+          // ANTES de salvar qualquer coisa.
+          if (editing) {
+            for (const item of ingredientes) {
+              if (item.tipo !== 'receita') continue;
+              if (item.receitaId === editing.id) {
+                toast('Uma receita não pode utilizar ela mesma como componente.', 'danger');
+                return;
+              }
+              if (recipeDependsOn(item.receitaId, editing.id)) {
+                const dep = getRecipe(item.receitaId);
+                toast(`Não é possível usar "${dep ? dep.nome : 'esta receita'}" aqui: isso criaria um ciclo (ela depende, direta ou indiretamente, desta receita).`, 'danger');
+                return;
+              }
+            }
+          }
+
           const data = {
-            nome, rendimento, pesoUnitarioPadrao, ingredientes: collectValidRows(),
+            nome, rendimento, pesoUnitarioPadrao, ingredientes,
             observacoes: document.getElementById('rObs').value,
           };
           if (editing) updateRecipe(editing.id, data); else addRecipe(data);
@@ -2680,9 +2892,10 @@
   function openDeleteRecipeConfirm(id) {
     const r = getRecipe(id);
     if (!r) return;
+    const dependentes = db.recipes.filter((other) => other.id !== id && (other.ingredientes || []).some((it) => itemComponentTipo(it) === 'receita' && it.receitaId === id));
     openConfirm({
       title: 'Excluir receita',
-      message: `Deseja realmente excluir a receita <strong>${escapeHtml(r.nome)}</strong>? Produções e cálculos já registrados permanecerão no histórico.`,
+      message: `Deseja realmente excluir a receita <strong>${escapeHtml(r.nome)}</strong>? Produções e cálculos já registrados permanecerão no histórico.${dependentes.length ? ` Atenção: ${dependentes.length} receita(s) usam esta como sub-receita/preparo (${dependentes.map((d) => escapeHtml(d.nome)).join(', ')}) — o cálculo de custo delas deixará de considerar este componente.` : ''}`,
       confirmLabel: 'Excluir',
       danger: true,
       onConfirm: () => { deleteRecipe(id); renderAll(); toast('Receita excluída.', 'success'); },
@@ -3287,7 +3500,7 @@
           ? { label: 'Parcial', fundo: '#fff4df', texto: '#986414', borda: '#f1d39b' }
           : { label: 'Em estoque', fundo: '#f2ece3', texto: '#6b4a30', borda: '#ddc9b6' };
       const movimentos = getReadyProductMovements().filter((mov) => mov.productionId === p.id);
-      const totalBaixado = m.quantidadeVendida + m.quantidadeAlocadaCaixas + m.quantidadeMovimentada;
+      const totalBaixado = m.quantidadeVendida + m.quantidadeAlocadaCaixas + m.quantidadeAlocadaPreparos + m.quantidadeMovimentada;
       return `
       <div class="producao-item" data-id="${p.id}" style="padding:16px 18px;${m.status === 'finalizada' ? 'opacity:.86;background:#faf6f3;' : ''}">
         <div style="display:grid;grid-template-columns:minmax(230px,1.5fr) minmax(260px,1fr) auto;gap:16px;align-items:center;">
@@ -3312,10 +3525,11 @@
           </div>
         </div>
 
-        <div style="display:grid;grid-template-columns:repeat(5,minmax(76px,1fr));gap:7px;margin-top:12px;">
+        <div style="display:grid;grid-template-columns:repeat(6,minmax(70px,1fr));gap:7px;margin-top:12px;">
           <div style="padding:7px 9px;border-radius:9px;background:#faf5f2;"><span style="display:block;font-size:10px;opacity:.65;">Produzido</span><strong style="font-size:13px;">${formatNumber(m.quantidadeProduzida, 0)}</strong></div>
           <div style="padding:7px 9px;border-radius:9px;background:#faf5f2;"><span style="display:block;font-size:10px;opacity:.65;">Vendido</span><strong style="font-size:13px;">${formatNumber(m.quantidadeVendida, 0)}</strong></div>
           <div style="padding:7px 9px;border-radius:9px;background:#faf5f2;"><span style="display:block;font-size:10px;opacity:.65;">Caixinhas</span><strong style="font-size:13px;">${formatNumber(m.quantidadeAlocadaCaixas, 0)}</strong></div>
+          <div style="padding:7px 9px;border-radius:9px;background:#faf5f2;"><span style="display:block;font-size:10px;opacity:.65;">Sub-receitas</span><strong style="font-size:13px;">${formatNumber(m.quantidadeAlocadaPreparos, 0)}</strong></div>
           <div style="padding:7px 9px;border-radius:9px;background:#faf5f2;"><span style="display:block;font-size:10px;opacity:.65;">Movimentado</span><strong style="font-size:13px;">${formatNumber(m.quantidadeMovimentada, 0)}</strong></div>
           <div style="padding:7px 9px;border-radius:9px;background:${m.quantidadeRestante <= EPS ? '#e8f6ee' : '#fff1eb'};"><span style="display:block;font-size:10px;opacity:.65;">Disponível</span><strong style="font-size:13px;">${formatNumber(m.quantidadeRestante, 0)}</strong></div>
         </div>
@@ -3913,6 +4127,7 @@
           danger: true,
           onConfirm: () => {
             db = Object.assign(defaultDB(), parsed);
+            migrateProductions(); // garante compatibilidade com backups antigos (campos novos de sub-receitas, etc.)
             saveDB();
             renderAll();
             toast('Backup importado com sucesso.', 'success');
