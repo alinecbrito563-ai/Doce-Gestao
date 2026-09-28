@@ -241,10 +241,44 @@
     return v.toLocaleString('pt-BR', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
   }
 
+  // Formata uma quantidade SOMENTE PARA EXIBIÇÃO, com até 2 casas decimais e
+  // sem forçar zeros: 630 -> "630", 1,63 -> "1,63", 1 -> "1". Nunca altera o
+  // valor armazenado internamente.
+  function formatQty(v) {
+    v = Number(v) || 0;
+    return v.toLocaleString('pt-BR', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+  }
+
+  // Valor monetário para EXIBIÇÃO de preços unitários. Usa 2 casas normalmente;
+  // se o valor for menor que 1 centavo (e maior que zero), mostra 4 casas para
+  // não aparecer "R$ 0,00" enganosamente.
+  function formatMoneyPrecise(v) {
+    v = Number(v) || 0;
+    const abs = Math.abs(v);
+    const decimals = abs > 0 && abs < 0.01 ? 4 : 2;
+    return v.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL', minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+  }
+
   function familyOf(unit) { return UNIT_FAMILY[unit]; }
   function compatibleUnitsFor(unit) { return COMPATIBLE_UNITS[familyOf(unit)] || ['unidade']; }
   function toBase(qty, unit) { return (Number(qty) || 0) * (UNIT_BASE_FACTOR[unit] || 1); }
   function fromBase(qtyBase, unit) { return (Number(qtyBase) || 0) / (UNIT_BASE_FACTOR[unit] || 1); }
+
+  // Exibe o custo unitário de um ingrediente em uma unidade "legível",
+  // SEM alterar o valor interno (que continua com precisão total):
+  //   g / kg      -> R$/kg
+  //   ml / L      -> R$/L
+  //   unidade     -> R$/un
+  // `valorUnitario` é o valor por unidade de cadastro do ingrediente (ex.:
+  // R$ por grama se o ingrediente é em g; R$ por kg se é em kg), exatamente
+  // como já é armazenado em cada compra.
+  function formatUnitPrice(valorUnitario, ingredientUnit) {
+    const pricePerBase = (Number(valorUnitario) || 0) / (UNIT_BASE_FACTOR[ingredientUnit] || 1);
+    const fam = familyOf(ingredientUnit);
+    if (fam === 'peso') return formatMoneyPrecise(pricePerBase * 1000) + '/kg';
+    if (fam === 'volume') return formatMoneyPrecise(pricePerBase * 1000) + '/L';
+    return formatMoneyPrecise(pricePerBase) + '/un';
+  }
 
   // Unidades que uma receita pode usar para um determinado ingrediente. Quando o
   // ingrediente é medido por "unidade" e possui peso por unidade cadastrado
@@ -268,19 +302,21 @@
     return toBase(quantity, unit);
   }
 
-  // Escolhe a melhor unidade de exibição (ex.: 1500g -> "1,5 kg")
+  // Escolhe a melhor unidade de exibição (ex.: 1500g -> "1,5 kg").
+  // Quantidades fracionadas mostram até 2 casas decimais (1,63 g -> "1,63 g"),
+  // quantidades inteiras aparecem sem casas (630 g -> "630 g", 1000 g -> "1 kg").
   function formatQuantityBase(qtyBase, ingredientUnit) {
     const fam = familyOf(ingredientUnit);
     qtyBase = Number(qtyBase) || 0;
     if (fam === 'peso') {
-      if (Math.abs(qtyBase) >= 1000) return formatNumber(qtyBase / 1000, 2) + ' kg';
-      return formatNumber(qtyBase, 0) + ' g';
+      if (Math.abs(qtyBase) >= 1000) return formatQty(qtyBase / 1000) + ' kg';
+      return formatQty(qtyBase) + ' g';
     }
     if (fam === 'volume') {
-      if (Math.abs(qtyBase) >= 1000) return formatNumber(qtyBase / 1000, 2) + ' L';
-      return formatNumber(qtyBase, 0) + ' ml';
+      if (Math.abs(qtyBase) >= 1000) return formatQty(qtyBase / 1000) + ' L';
+      return formatQty(qtyBase) + ' ml';
     }
-    return formatNumber(qtyBase, qtyBase % 1 === 0 ? 0 : 1) + ' un';
+    return formatQty(qtyBase) + ' un';
   }
 
   function escapeHtml(str) {
@@ -562,8 +598,15 @@
   function duplicatePurchase(id) {
     const p = db.purchases.find((x) => x.id === id);
     if (!p) return;
+    // Lotes antigos podem ter `quantidade` zerada embora `quantidadeBase`
+    // esteja correta; nesse caso recupera a quantidade real para que a cópia
+    // realmente entre no estoque (em vez de criar um lote de 0).
+    const ing = getIngredient(p.ingredienteId);
+    const quantidade = Number(p.quantidade) > 0
+      ? Number(p.quantidade)
+      : (ing ? fromBase(p.quantidadeBase, ing.unidade) : 0);
     addPurchase(p.ingredienteId, {
-      marca: p.marca, quantidade: p.quantidade, valorTotal: p.valorTotal,
+      marca: p.marca, quantidade, valorTotal: p.valorTotal,
       considerarFinanceiro: p.considerarFinanceiro !== false, origem: p.origem || 'Compra',
       validade: p.validade, dataCompra: todayISO(),
     });
@@ -2429,16 +2472,21 @@
       const listEl = document.getElementById('purchaseListArea');
       if (!listEl) return;
       if (!items.length) { listEl.innerHTML = `<p class="confirm-text">Nenhuma compra registrada ainda.</p>`; return; }
-      listEl.innerHTML = items.map((p) => `
+      listEl.innerHTML = items.map((p) => {
+        // Lotes antigos podem ter `quantidade` zerada; nesse caso exibe a
+        // quantidade real a partir de `quantidadeBase` (apenas exibição).
+        const qtdLote = Number(p.quantidade) > 0 ? Number(p.quantidade) : fromBase(p.quantidadeBase, ing.unidade);
+        return `
         <div class="mini-row">
-          <span class="name">${escapeHtml(p.marca || 'Sem marca')} — ${formatNumber(p.quantidade, 2)} ${ing.unidade} (${formatMoney(p.valorUnitario)}/${ing.unidade}) · ${formatDateBR(p.dataCompra)} <span class="badge ${p.considerarFinanceiro === false ? 'badge-muted' : 'badge-ok'}">${p.considerarFinanceiro === false ? escapeHtml(p.origem || 'Não afeta o caixa') : 'Financeiro'}</span></span>
+          <span class="name">${escapeHtml(p.marca || 'Sem marca')} — ${formatQty(qtdLote)} ${ing.unidade} (${formatUnitPrice(p.valorUnitario, ing.unidade)}) · ${formatDateBR(p.dataCompra)} <span class="badge ${p.considerarFinanceiro === false ? 'badge-muted' : 'badge-ok'}">${p.considerarFinanceiro === false ? escapeHtml(p.origem || 'Não afeta o caixa') : 'Financeiro'}</span></span>
           <span style="display:flex; gap:6px;">
             <button class="btn btn-sm btn-icon" data-action="editar-compra" data-id="${p.id}" data-ing="${ingredienteId}" title="Editar">${ICONS.edit}</button>
             <button class="btn btn-sm btn-icon" data-action="duplicar-compra" data-id="${p.id}" data-ing="${ingredienteId}" title="Duplicar">${ICONS.plus}</button>
             <button class="btn btn-sm btn-icon btn-danger" data-action="excluir-compra" data-id="${p.id}" data-ing="${ingredienteId}" title="Excluir">${ICONS.trash}</button>
           </span>
         </div>
-      `).join('');
+      `;
+      }).join('');
     }
 
     openModal({
@@ -2503,7 +2551,9 @@
           const valorTotal = valorTotalInput.valueAsNumber;
 
           if (Number.isFinite(quantidade) && quantidade > 0 && Number.isFinite(valorTotal)) {
-            valorUnitarioInput.value = formatMoney(valorTotal / quantidade);
+            // Apenas exibição (R$/kg, R$/L ou R$/un). O valor interno salvo na
+            // compra continua sendo valorTotal / quantidade, sem arredondamento.
+            valorUnitarioInput.value = formatUnitPrice(valorTotal / quantidade, ing.unidade);
           } else {
             valorUnitarioInput.value = '—';
           }
@@ -2532,7 +2582,7 @@
             if (!result.ok) { toast(result.message, 'danger'); return; }
             closeModal();
             renderAll();
-            toast(`Compra atualizada: ${formatNumber(Number(data.quantidade), 2)} ${ing.unidade} por ${formatMoney(Number(data.valorTotal))}.`, 'success');
+            toast(`Compra atualizada: ${formatQty(Number(data.quantidade))} ${ing.unidade} por ${formatMoney(Number(data.valorTotal))}.`, 'success');
             return;
           }
           addPurchase(ingredienteId, data);
@@ -4385,23 +4435,49 @@
     document.getElementById('app').style.display = '';
   }
 
+  // Controle para carregar os dados da nuvem UMA única vez por usuário logado.
+  // O Supabase dispara eventos de sessão várias vezes (sessão inicial,
+  // renovação automática do token, volta à aba etc.). Antes, cada um desses
+  // eventos recarregava `db` do Supabase — se isso acontecesse logo depois de
+  // uma compra (antes do envio para a nuvem terminar), a compra recém-lançada
+  // sumia do estoque. Agora os dados só são recarregados quando o usuário
+  // realmente muda (novo login ou troca de conta).
+  let bootedUserId = null;
+  let bootInProgress = null;
+
   // Carrega os dados do usuário autenticado e só então exibe o sistema.
   // Se o Supabase não puder ser alcançado nesse instante, usa o último
   // cache local como rede de segurança (o Supabase continua sendo a fonte
   // de verdade: na próxima sincronização bem-sucedida ele volta a mandar).
   async function bootApp(user) {
-    currentUser = user;
-    try {
-      db = await loadDBFromSupabase(user.id);
-    } catch (e) {
-      console.error('Erro ao carregar dados do Supabase:', e);
-      toast('Não foi possível carregar seus dados da nuvem agora. Mostrando o último dado salvo neste dispositivo.', 'warning');
-      db = loadDBFromLocalCache();
+    if (bootedUserId === user.id) {
+      // Mesmo usuário já carregado: apenas atualiza a sessão, sem recarregar
+      // os dados (evita sobrescrever alterações locais ainda não sincronizadas).
+      currentUser = user;
+      hideAuthGate();
+      return;
     }
-    migrateProductions();
-    hideAuthGate();
-    const ultimaTela = localStorage.getItem('doceGestaoUltimaTela') || currentView || 'dashboard';
-    goToView(VIEW_TITLES[ultimaTela] ? ultimaTela : 'dashboard');
+    if (bootInProgress) return bootInProgress;
+    bootInProgress = (async () => {
+      currentUser = user;
+      try {
+        db = await loadDBFromSupabase(user.id);
+      } catch (e) {
+        console.error('Erro ao carregar dados do Supabase:', e);
+        toast('Não foi possível carregar seus dados da nuvem agora. Mostrando o último dado salvo neste dispositivo.', 'warning');
+        db = loadDBFromLocalCache();
+      }
+      bootedUserId = user.id;
+      migrateProductions();
+      hideAuthGate();
+      const ultimaTela = localStorage.getItem('doceGestaoUltimaTela') || currentView || 'dashboard';
+      goToView(VIEW_TITLES[ultimaTela] ? ultimaTela : 'dashboard');
+    })();
+    try {
+      await bootInProgress;
+    } finally {
+      bootInProgress = null;
+    }
   }
 
   if (!SUPABASE_CONFIGURADO) {
@@ -4427,9 +4503,14 @@
       setAuthMessage('Conta criada. Se a confirmação por e-mail estiver ativa no projeto, confirme antes de entrar.');
     });
 
+    // As chamadas ao Supabase dentro de bootApp são adiadas com setTimeout
+    // porque o próprio Supabase recomenda não aguardar outras chamadas dentro
+    // do callback de onAuthStateChange (pode travar a sessão).
     sb.auth.onAuthStateChange((_event, session) => {
-      if (session && session.user) bootApp(session.user);
-      else { currentUser = null; showAuthGate(); }
+      setTimeout(() => {
+        if (session && session.user) bootApp(session.user);
+        else { currentUser = null; bootedUserId = null; showAuthGate(); }
+      }, 0);
     });
 
     sb.auth.getSession().then(({ data }) => {
